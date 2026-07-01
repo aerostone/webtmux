@@ -21,6 +21,25 @@ type FileEntry struct {
 	Mode    string `json:"mode"`
 }
 
+// validatePath checks if the path is within allowed root directory
+func validatePath(path string) (string, error) {
+	// Get allowed root (default to home directory)
+	root, err := os.UserHomeDir()
+	if err != nil {
+		root = "/"
+	}
+	
+	// Clean the path
+	cleaned := filepath.Clean(path)
+	
+	// Check if path is within root
+	if !strings.HasPrefix(cleaned, root) && cleaned != root {
+		return "", fmt.Errorf("access denied: path outside allowed directory")
+	}
+	
+	return cleaned, nil
+}
+
 func (s *Server) handleFileManager(w http.ResponseWriter, r *http.Request) {
 	action := r.URL.Query().Get("action")
 
@@ -52,8 +71,13 @@ func (s *Server) handleFileList(w http.ResponseWriter, r *http.Request) {
 		dir = filepath.Join(home, dir[1:])
 	}
 
-	// Clean and validate path
-	dir = filepath.Clean(dir)
+	// Validate path - prevent path traversal
+	var err error
+	dir, err = validatePath(dir)
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -104,6 +128,14 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(destDir, "~") {
 		home, _ := os.UserHomeDir()
 		destDir = filepath.Join(home, destDir[1:])
+	}
+
+	// Validate path - prevent path traversal
+	var err error
+	destDir, err = validatePath(destDir)
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
 	}
 
 	// Get uploaded files
@@ -163,7 +195,13 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 		filePath = filepath.Join(home, filePath[1:])
 	}
 
-	filePath = filepath.Clean(filePath)
+	// Validate path - prevent path traversal
+	var err error
+	filePath, err = validatePath(filePath)
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
 
 	info, err := os.Stat(filePath)
 	if err != nil {
@@ -200,6 +238,14 @@ func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 		req.Path = filepath.Join(home, req.Path[1:])
 	}
 
+	// Validate path - prevent path traversal
+	var err error
+	req.Path, err = validatePath(req.Path)
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
+	}
+
 	if err := os.Remove(req.Path); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -227,6 +273,14 @@ func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(req.Path, "~") {
 		home, _ := os.UserHomeDir()
 		req.Path = filepath.Join(home, req.Path[1:])
+	}
+
+	// Validate path - prevent path traversal
+	var err error
+	req.Path, err = validatePath(req.Path)
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return
 	}
 
 	if err := os.MkdirAll(req.Path, 0755); err != nil {
