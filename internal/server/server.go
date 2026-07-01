@@ -51,6 +51,27 @@ type wsConnState struct {
 	cmdDone chan struct{} // closed when tmux process exits
 }
 
+// closeAllConns closes all active WebSocket connections
+// Used on login/logout to ensure clean state
+func (s *Server) closeAllConns() {
+	s.wsConnMu.Lock()
+	defer s.wsConnMu.Unlock()
+
+	count := len(s.wsConns)
+	if count == 0 {
+		return
+	}
+
+	log.Printf("ws closing all connections: count=%d", count)
+	for name, state := range s.wsConns {
+		state.conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "session ended"))
+		state.conn.Close()
+		log.Printf("ws closed connection: session=%s", name)
+	}
+	s.wsConns = make(map[string]*wsConnState)
+}
+
 type loginRequest struct {
 	Password string `json:"password"`
 	TOTPCode string `json:"totp_code,omitempty"`
@@ -302,6 +323,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.rateLimit.Reset(key)
+
+	// Close all existing connections on login for clean state
+	s.closeAllConns()
+
 	s.session.SetCookie(w)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -309,6 +334,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	// Close all connections on logout
+	s.closeAllConns()
+
 	s.session.ClearCookie(w)
 	w.WriteHeader(http.StatusOK)
 }
