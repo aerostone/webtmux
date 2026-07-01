@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -10,11 +11,15 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/gorilla/websocket"
 
-	"github.com/aerostone/webtmux/internal/auth"
+	authpkg "github.com/aerostone/webtmux/internal/auth"
 	"github.com/aerostone/webtmux/internal/config"
 	"github.com/aerostone/webtmux/internal/tmux"
 )
@@ -26,10 +31,14 @@ type Server struct {
 	cfg       *config.Config
 	mux       *http.ServeMux
 	tmux      *tmux.Manager
-	filter    *auth.IPFilter
-	session   *auth.SessionManager
-	rateLimit *auth.RateLimiter
+	filter    *authpkg.IPFilter
+	session   *authpkg.SessionManager
+	rateLimit *authpkg.RateLimiter
 	upgrade   websocket.Upgrader
+	credStore *authpkg.CredentialStore
+	webAuthn  *webauthn.WebAuthn // fallback when origin not detected
+	waCache   map[string]*webauthn.WebAuthn
+	waMu      sync.RWMutex
 }
 
 type loginRequest struct {
@@ -42,13 +51,23 @@ type createSessionReq struct {
 }
 
 func New(cfg *config.Config) *http.Server {
-	filter, _ := auth.NewIPFilter(cfg.IPWhitelist)
-	session := auth.NewSessionManager(cfg.SessionSecret)
-	rateLimit := auth.NewRateLimiter(
+	filter, _ := authpkg.NewIPFilter(cfg.IPWhitelist)
+	session := authpkg.NewSessionManager(cfg.SessionSecret)
+	rateLimit := authpkg.NewRateLimiter(
 		cfg.MaxLoginAttempts,
 		time.Duration(cfg.LoginWindowSec)*time.Second,
 		time.Duration(cfg.LoginLockoutSec)*time.Second,
 	)
+
+	// WebAuthn setup
+	credStore, err := authpkg.NewCredentialStore(cfg.WebAuthnDir)
+	if err != nil {
+		log.Printf("webauthn: credential store error: %v (fingerprint disabled)", err)
+	}
+	wa, err := authpkg.NewWebAuthn(cfg.WebAuthnRPID, cfg.WebAuthnOrigin)
+	if err != nil {
+		log.Printf("webauthn: init error: %v (fingerprint disabled)", err)
+	}
 
 	s := &Server{
 		cfg:       cfg,
@@ -57,6 +76,8 @@ func New(cfg *config.Config) *http.Server {
 		filter:    filter,
 		session:   session,
 		rateLimit: rateLimit,
+		credStore: credStore,
+		webAuthn:  wa,
 		upgrade: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				if cfg.AllowAllOrigins {
@@ -66,7 +87,6 @@ func New(cfg *config.Config) *http.Server {
 				if origin == "" {
 					return true
 				}
-				// Allow same-origin: compare host portion of Origin with Host header
 				originURL, err := url.Parse(origin)
 				if err != nil {
 					return false
@@ -78,8 +98,8 @@ func New(cfg *config.Config) *http.Server {
 	s.routes()
 
 	handler := loggingMiddleware(recoveryMiddleware(securityHeaders(
-		auth.Middleware(s.filter)(
-			auth.LoginRequired(&auth.AuthConfig{
+		authpkg.Middleware(filter)(
+			authpkg.LoginRequired(&authpkg.AuthConfig{
 				Password:    cfg.AuthPass,
 				TOTPSecret:  cfg.TOTPSecret,
 				TOTPEnabled: cfg.TOTPEnabled,
@@ -160,10 +180,63 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/sessions", s.handleSessions)
 	s.mux.HandleFunc("/api/sessions/create", s.handleCreateSession)
 	s.mux.HandleFunc("/api/sessions/kill", s.handleKillSession)
+	s.mux.HandleFunc("/api/webauthn/status", s.handleWebAuthnStatus)
+	s.mux.HandleFunc("/api/webauthn/register/start", s.handleWebAuthnRegisterStart)
+	s.mux.HandleFunc("/api/webauthn/register/finish", s.handleWebAuthnRegisterFinish)
+	s.mux.HandleFunc("/api/webauthn/login/start", s.handleWebAuthnLoginStart)
+	s.mux.HandleFunc("/api/webauthn/login/finish", s.handleWebAuthnLoginFinish)
+	s.mux.HandleFunc("/api/webauthn/remove", s.handleWebAuthnRemove)
 	s.mux.HandleFunc("/ws", s.handleWebSocket)
 
 	webContent, _ := fs.Sub(webFS, "web")
 	s.mux.Handle("/", http.FileServer(http.FS(webContent)))
+}
+
+// getWebAuthn returns a WebAuthn instance for the request's origin.
+// Falls back to the default instance if origin cannot be detected.
+func (s *Server) getWebAuthn(r *http.Request) *webauthn.WebAuthn {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		origin = fmt.Sprintf("%s://%s", scheme, r.Host)
+	}
+
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		if s.webAuthn != nil {
+			return s.webAuthn
+		}
+		return nil
+	}
+
+	rpID := strings.Split(u.Host, ":")[0] // strip port
+	originKey := u.Scheme + "://" + u.Host
+
+	s.waMu.RLock()
+	wa, ok := s.waCache[originKey]
+	s.waMu.RUnlock()
+	if ok {
+		return wa
+	}
+
+	wa, err = authpkg.NewWebAuthn(rpID, origin)
+	if err != nil {
+		log.Printf("webauthn: failed to create instance for %s: %v", origin, err)
+		return s.webAuthn
+	}
+
+	s.waMu.Lock()
+	if s.waCache == nil {
+		s.waCache = make(map[string]*webauthn.WebAuthn)
+	}
+	s.waCache[originKey] = wa
+	s.waMu.Unlock()
+
+	log.Printf("webauthn: created instance for rpID=%s origin=%s", rpID, origin)
+	return wa
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -208,7 +281,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.cfg.TOTPEnabled && s.cfg.TOTPSecret != "" {
-		if !auth.VerifyTOTP(s.cfg.TOTPSecret, req.TOTPCode) {
+		if !authpkg.VerifyTOTP(s.cfg.TOTPSecret, req.TOTPCode) {
 			s.rateLimit.RecordFailure(key)
 			http.Error(w, "invalid TOTP code", http.StatusUnauthorized)
 			return
@@ -344,4 +417,209 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("ws disconnect: session=%s", sessionName)
+}
+
+// ─── WebAuthn handlers ───
+
+func (s *Server) handleWebAuthnStatus(w http.ResponseWriter, r *http.Request) {
+	wa := s.getWebAuthn(r)
+	if wa == nil || s.credStore == nil {
+		http.Error(w, "webauthn not available", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{
+		"enabled":    true,
+		"registered": s.credStore.HasCredentials(),
+	})
+}
+
+func (s *Server) handleWebAuthnRegisterStart(w http.ResponseWriter, r *http.Request) {
+	wa := s.getWebAuthn(r)
+	if wa == nil || s.credStore == nil {
+		http.Error(w, "webauthn not available", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	user := authpkg.NewWebAuthnUser(s.credStore)
+	credCreation, sessionData, err := wa.BeginRegistration(
+		user,
+		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
+			AuthenticatorAttachment: protocol.Platform,
+			UserVerification:        protocol.VerificationPreferred,
+		}),
+		webauthn.WithConveyancePreference(protocol.PreferNoAttestation),
+	)
+	if err != nil {
+		log.Printf("webauthn register start error: %v", err)
+		http.Error(w, "registration failed", http.StatusInternalServerError)
+		return
+	}
+
+	// Store session data in a temporary cookie (base64 encoded)
+	sessionJSON, _ := json.Marshal(sessionData)
+	cookie := &http.Cookie{
+		Name:     "webauthn_session",
+		Value:    base64.StdEncoding.EncodeToString(sessionJSON),
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   300,
+	}
+	http.SetCookie(w, cookie)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(credCreation)
+}
+
+func (s *Server) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Request) {
+	wa := s.getWebAuthn(r)
+	if wa == nil || s.credStore == nil {
+		http.Error(w, "webauthn not available", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Recover session data from cookie
+	sessionCookie, err := r.Cookie("webauthn_session")
+	if err != nil {
+		http.Error(w, "session expired", http.StatusBadRequest)
+		return
+	}
+	decodedCookie, err := base64.StdEncoding.DecodeString(sessionCookie.Value)
+	if err != nil {
+		http.Error(w, "invalid session", http.StatusBadRequest)
+		return
+	}
+	var sessionData webauthn.SessionData
+	if err := json.Unmarshal(decodedCookie, &sessionData); err != nil {
+		http.Error(w, "invalid session", http.StatusBadRequest)
+		return
+	}
+
+	user := authpkg.NewWebAuthnUser(s.credStore)
+	cred, err := wa.FinishRegistration(user, sessionData, r)
+	if err != nil {
+		log.Printf("webauthn register finish error: %v", err)
+		http.Error(w, "registration failed", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.credStore.SaveCredential(cred); err != nil {
+		log.Printf("webauthn save credential error: %v", err)
+		http.Error(w, "save failed", http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("webauthn: credential registered")
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":"ok"}`))
+}
+
+func (s *Server) handleWebAuthnLoginStart(w http.ResponseWriter, r *http.Request) {
+	wa := s.getWebAuthn(r)
+	if wa == nil || s.credStore == nil {
+		http.Error(w, "webauthn not available", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.credStore.HasCredentials() {
+		http.Error(w, "no credentials registered", http.StatusNotFound)
+		return
+	}
+
+	user := authpkg.NewWebAuthnUser(s.credStore)
+	assertion, sessionData, err := wa.BeginLogin(user)
+	if err != nil {
+		log.Printf("webauthn login start error: %v", err)
+		http.Error(w, "login failed", http.StatusInternalServerError)
+		return
+	}
+
+	sessionJSON, _ := json.Marshal(sessionData)
+	cookie := &http.Cookie{
+		Name:     "webauthn_session",
+		Value:    base64.StdEncoding.EncodeToString(sessionJSON),
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   300,
+	}
+	http.SetCookie(w, cookie)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(assertion)
+}
+
+func (s *Server) handleWebAuthnLoginFinish(w http.ResponseWriter, r *http.Request) {
+	wa := s.getWebAuthn(r)
+	if wa == nil || s.credStore == nil {
+		http.Error(w, "webauthn not available", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	sessionCookie, err := r.Cookie("webauthn_session")
+	if err != nil {
+		http.Error(w, "session expired", http.StatusBadRequest)
+		return
+	}
+	decodedCookie, err := base64.StdEncoding.DecodeString(sessionCookie.Value)
+	if err != nil {
+		http.Error(w, "invalid session", http.StatusBadRequest)
+		return
+	}
+	var sessionData webauthn.SessionData
+	if err := json.Unmarshal(decodedCookie, &sessionData); err != nil {
+		http.Error(w, "invalid session", http.StatusBadRequest)
+		return
+	}
+
+	user := authpkg.NewWebAuthnUser(s.credStore)
+	cred, err := wa.FinishLogin(user, sessionData, r)
+	if err != nil {
+		log.Printf("webauthn login finish error: %v", err)
+		http.Error(w, "authentication failed", http.StatusUnauthorized)
+		return
+	}
+
+	// Update sign count
+	if cred != nil {
+		s.credStore.UpdateSignCount(cred.ID, cred.Authenticator.SignCount)
+	}
+
+	s.session.SetCookie(w)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":"ok"}`))
+}
+
+func (s *Server) handleWebAuthnRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.credStore == nil {
+		http.Error(w, "webauthn not available", http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.credStore.Clear(); err != nil {
+		http.Error(w, "remove failed", http.StatusInternalServerError)
+		return
+	}
+	log.Printf("webauthn: all credentials removed")
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"status":"ok"}`))
 }

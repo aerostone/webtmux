@@ -9,6 +9,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func expandHome(path string) string {
+	if len(path) >= 2 && path[:2] == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return home + path[1:]
+		}
+	}
+	return path
+}
+
 type Config struct {
 	ListenAddr       string   `json:"listen_addr" yaml:"listen_addr"`
 	TLSCertFile      string   `json:"tls_cert_file" yaml:"tls_cert_file"`
@@ -26,6 +35,9 @@ type Config struct {
 	LoginLockoutSec int      `json:"login_lockout_sec" yaml:"login_lockout_sec"`
 	WSTimeoutSec    int      `json:"ws_timeout_sec" yaml:"ws_timeout_sec"`
 	AllowAllOrigins bool     `json:"allow_all_origins" yaml:"allow_all_origins"`
+	WebAuthnRPID    string   `json:"webauthn_rpid" yaml:"webauthn_rpid"`
+	WebAuthnOrigin  string   `json:"webauthn_origin" yaml:"webauthn_origin"`
+	WebAuthnDir     string   `json:"webauthn_dir" yaml:"webauthn_dir"`
 }
 
 func Load() (*Config, error) {
@@ -39,6 +51,9 @@ func loadWithArgs(args []string) (*Config, error) {
 		LoginWindowSec:  300,
 		LoginLockoutSec: 900,
 		WSTimeoutSec:    300,
+		WebAuthnRPID:    "localhost",
+		WebAuthnOrigin:  "http://localhost:8080",
+		WebAuthnDir:     "~/.webtmux",
 	}
 
 	fs := flag.NewFlagSet("webtmux", flag.ContinueOnError)
@@ -88,6 +103,9 @@ func loadWithArgs(args []string) (*Config, error) {
 			cfg.WSTimeoutSec = f.Value.(flag.Getter).Get().(int)
 		}
 	})
+
+	// Expand ~ in WebAuthnDir
+	cfg.WebAuthnDir = expandHome(cfg.WebAuthnDir)
 
 	return cfg, nil
 }
@@ -144,5 +162,14 @@ func applyEnv(cfg *Config) {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.WSTimeoutSec = n
 		}
+	}
+	if v := os.Getenv("WEBTMUX_WEBAUTHN_RPID"); v != "" {
+		cfg.WebAuthnRPID = v
+	}
+	if v := os.Getenv("WEBTMUX_WEBAUTHN_ORIGIN"); v != "" {
+		cfg.WebAuthnOrigin = v
+	}
+	if v := os.Getenv("WEBTMUX_WEBAUTHN_DIR"); v != "" {
+		cfg.WebAuthnDir = v
 	}
 }

@@ -33,6 +33,10 @@ func isPublicPath(path string) bool {
 	if path == "/" || path == "/health" || path == "/api/login" || path == "/api/config" {
 		return true
 	}
+	// WebAuthn login endpoints are public (replaces password login)
+	if path == "/api/webauthn/login/start" || path == "/api/webauthn/login/finish" || path == "/api/webauthn/status" {
+		return true
+	}
 	if strings.HasPrefix(path, "/login") {
 		return true
 	}

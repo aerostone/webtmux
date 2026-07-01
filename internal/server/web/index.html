@@ -4,7 +4,46 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>webtmux</title>
-<link rel="stylesheet" href="https://registry.npmmirror.com/@xterm/xterm/5.5.0/files/css/xterm.css?v=202607011400">
+<script>
+// Minimal Sentry-compatible error reporter (~1.5KB)
+(function(){
+  const DSN='REDACTED_DSN';
+  const p=DSN.split('@');
+  const key=p[0];
+  const hostPath=p[1].split('/');
+  const host=hostPath[0];
+  const pid=hostPath[1];
+  const endpoint='https://'+host+'/api/'+pid+'/store/';
+  let lastSend=0;
+  function uuid(){return Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('')}
+  function send(ev){
+    const now=Date.now();if(now-lastSend<5000)return;lastSend=now;
+    const body=JSON.stringify({event_id:uuid(),timestamp:new Date().toISOString(),level:'error',platform:'javascript',
+      sdk:{name:'webtmux-mini-sentry',version:'1.0.0'},
+      exception:{values:[{type:ev.type||'Error',value:ev.message||'',stacktrace:{frames:ev.frames||[]}}]},
+      message:ev.message||'',tags:{source:ev.source||''}});
+    navigator.sendBeacon(endpoint,new Blob([body],{type:'application/json'}));
+  }
+  window.onerror=function(msg,src,line,col,err){
+    const frames=[];
+    if(err&&err.stack){
+      err.stack.split('\n').slice(1,6).forEach(l=>{
+        const m=l.match(/at\s+(.+?)\s+\((.+?):(\d+):(\d+)\)/);
+        frames.unshift(m?{function:m[1],filename:m[2],lineno:+m[3],colno:+m[4]}:{filename:l.trim()});
+      });
+    }
+    send({type:'Error',message:typeof msg==='string'?msg:String(msg),source:src,frames:frames});
+  };
+  window.addEventListener('unhandledrejection',function(e){
+    const r=e.reason;send({type:'UnhandledRejection',message:r&&(r.message||String(r))});
+  });
+  window.Sentry={captureException:function(e){send({type:e.name||'Error',message:e.message||String(e)})},
+    captureMessage:function(m){send({type:'Message',message:m})}};
+})();
+</script>
+<link rel="stylesheet" href="https://s4.zstatic.net/npm/@xterm/xterm@5.5.0/css/xterm.css?v=202607011400">
+<script src="https://s4.zstatic.net/npm/@xterm/xterm@5.5.0/lib/xterm.js?v=202607011400"></script>
+<script src="https://s4.zstatic.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js?v=202607011400"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:100vh;height:100dvh;display:flex;flex-direction:column;overflow:hidden;-webkit-user-select:none;user-select:none}
@@ -115,8 +154,27 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
     <input id="login-pass" type="password" placeholder="Password" autocomplete="current-password">
     <input id="login-totp" type="text" placeholder="TOTP Code (if enabled)" inputmode="numeric" pattern="[0-9]*" maxlength="6" style="display:none">
     <button id="login-btn"><span class="spinner"></span><span class="btn-text">Login</span></button>
+    <button id="fingerprint-btn" style="display:none;margin-top:10px;width:100%;padding:10px;background:#161b22;color:#58a6ff;border:1px solid #30363d;border-radius:6px;font-size:14px;cursor:pointer">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;margin-right:6px"><path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4"/><path d="M14 13.12c0 2.38 0 6.38-1 8.88"/><path d="M17.29 21.02c.12-.6.43-2.3.5-3.02"/><path d="M2 12a10 10 0 0 1 18-6"/><path d="M2 16h.01"/><path d="M21.8 16c.2-2 .131-5.354 0-6"/><path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2"/><path d="M8.65 22c.21-.66.45-1.32.57-2"/><path d="M9 6.8a6 6 0 0 1 9 5.2v2"/></svg>
+      指纹登录
+    </button>
     <div id="login-error"></div>
     <div id="login-success"></div>
+  </div>
+</div>
+
+<!-- Kill confirmation modal -->
+<div id="kill-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:1000;align-items:center;justify-content:center">
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;padding:24px;width:300px;max-width:90vw">
+    <h3 style="margin-bottom:12px;font-size:16px">⚠️ 确认删除会话</h3>
+    <p style="color:#8b949e;font-size:13px;margin-bottom:16px" id="kill-modal-name"></p>
+    <input id="kill-modal-pass" type="password" placeholder="输入登录密码确认" style="width:100%;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:8px">
+    <div id="kill-modal-error" style="color:#f85149;font-size:12px;margin-bottom:8px;min-height:16px"></div>
+    <div style="display:flex;gap:8px">
+      <button id="kill-modal-confirm" class="btn btn-red" style="flex:1">确认删除</button>
+      <button id="kill-modal-fp" class="btn btn-outline" style="flex:1;display:none">🔒 指纹确认</button>
+      <button id="kill-modal-cancel" class="btn btn-outline" style="flex:1">取消</button>
+    </div>
   </div>
 </div>
 
@@ -141,6 +199,12 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
   <!-- Sessions tab -->
   <div class="tab-content" id="tab-sessions">
     <div id="sessions-panel">
+      <div id="fp-section" style="display:none;padding:10px;margin-bottom:10px;background:#161b22;border:1px solid #30363d;border-radius:6px">
+        <button id="fp-toggle-btn" style="width:100%;padding:12px;background:#0d1117;color:#58a6ff;border:1px solid #30363d;border-radius:6px;font-size:15px;cursor:pointer;text-align:left;display:flex;align-items:center;gap:8px">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4"/><path d="M14 13.12c0 2.38 0 6.38-1 8.88"/><path d="M17.29 21.02c.12-.6.43-2.3.5-3.02"/><path d="M2 12a10 10 0 0 1 18-6"/><path d="M2 16h.01"/><path d="M21.8 16c.2-2 .131-5.354 0-6"/><path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2"/><path d="M8.65 22c.21-.66.45-1.32.57-2"/><path d="M9 6.8a6 6 0 0 1 9 5.2v2"/></svg>
+          <span id="fp-toggle-text">🔒 启用指纹登录</span>
+        </button>
+      </div>
       <div class="create-row">
         <input id="new-session-name" placeholder="session name (e.g. web-work)">
         <button class="btn btn-green" id="create-session-btn">+ New</button>
@@ -168,15 +232,8 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
   <button class="overlay-btn" id="reconnect-btn">重新连接</button>
 </div>
 
-<script type="importmap">
-{ "imports": {
-  "@xterm/xterm": "https://esm.run/@xterm/xterm@5.5.0?v=202607011400",
-  "@xterm/addon-fit": "https://esm.run/@xterm/addon-fit@0.10.0?v=202607011400"
-} }
-</script>
-<script type="module">
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
+<script>
+// UMD bundles: Terminal and FitAddon are globals from <script src> above
 
 const $=id=>document.getElementById(id);
 const loginView=$('login-view'), appView=$('app-view');
@@ -369,12 +426,14 @@ function showApp(){
   loginView.style.display='none';appView.style.display='flex';
   $('toolbar').style.display='block';$('mod-row').style.display='block';
   buildToolbar();buildModRow();initTerminal();loadSessionsList();
+  updateFpButton();
 }
 
 function initTerminal(){
   if(term)return;
   term=new Terminal({cursorBlink:true,fontSize:14,fontFamily:"'Cascadia Code','Fira Code',Menlo,Monaco,'Courier New',monospace",scrollback:5000,theme:{background:'#0d1117'}});
-  fitAddon=new FitAddon();term.loadAddon(fitAddon);
+  const FA=FitAddon.FitAddon||FitAddon;
+  fitAddon=new FA();term.loadAddon(fitAddon);
   term.open($('terminal-container'));
   requestAnimationFrame(()=>fitAddon.fit());
   // Click terminal area = focus → keyboard on mobile
@@ -407,7 +466,6 @@ $('reconnect-btn').addEventListener('click',()=>{
   }
   // reconnect: just re-create WS, keep terminal
   if(currentSession&&fitAddon){
-    fitAddon.fit();
     connect(currentSession);
   }else{
     location.reload();
@@ -439,7 +497,7 @@ async function loadSessionsList(){
       el.appendChild(card);
     });
     el.querySelectorAll('.btn-connect').forEach(b=>b.addEventListener('click',()=>connectSession(b.dataset.name)));
-    el.querySelectorAll('.btn-kill').forEach(b=>b.addEventListener('click',async()=>{await api('POST','/api/sessions/kill',{name:b.dataset.name});loadSessionsList()}));
+    el.querySelectorAll('.btn-kill').forEach(b=>b.addEventListener('click',()=>showKillModal(b.dataset.name)));;
   }catch(e){el.innerHTML='<div style="color:#f85149">Failed to load sessions</div>'}
 }
 
@@ -449,6 +507,49 @@ $('create-session-btn').addEventListener('click',async()=>{
   $('new-session-name').value='';loadSessionsList();
 });
 $('new-session-name').addEventListener('keydown',e=>{if(e.key==='Enter')$('create-session-btn').click()});
+
+// ─── Kill confirmation modal ───
+let killTargetName='';
+function showKillModal(name){
+  killTargetName=name;
+  $('kill-modal-name').textContent=`会话: ${name}`;
+  $('kill-modal-pass').value='';
+  $('kill-modal-error').textContent='';
+  $('kill-modal').style.display='flex';
+  $('kill-modal-fp').style.display=webauthnRegistered?'inline-flex':'none';
+  $('kill-modal-pass').focus();
+}
+function hideKillModal(){
+  $('kill-modal').style.display='none';
+  killTargetName='';
+}
+$('kill-modal-cancel').addEventListener('click',hideKillModal);
+$('kill-modal').addEventListener('click',e=>{if(e.target===$('kill-modal'))hideKillModal()});
+$('kill-modal-pass').addEventListener('keydown',e=>{if(e.key==='Enter')$('kill-modal-confirm').click()});
+$('kill-modal-confirm').addEventListener('click',async()=>{
+  const pass=$('kill-modal-pass').value.trim();
+  if(!pass){$('kill-modal-error').textContent='请输入密码';return}
+  // Verify password first
+  try{
+    const res=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pass})});
+    if(!res.ok){$('kill-modal-error').textContent='密码错误';return}
+  }catch(e){$('kill-modal-error').textContent='验证失败';return}
+  await api('POST','/api/sessions/kill',{name:killTargetName});
+  hideKillModal();loadSessionsList();
+});
+$('kill-modal-fp').addEventListener('click',async()=>{
+  try{
+    const optRes=await fetch('/api/webauthn/login/start');
+    if(!optRes.ok){$('kill-modal-error').textContent='指纹不可用';return}
+    const options=await optRes.json();
+    const pk=options.publicKey||options;
+    const cred=await navigator.credentials.get({publicKey:{challenge:b64ToBuf(pk.challenge),timeout:pk.timeout,rpId:pk.rpId,allowCredentials:(pk.allowCredentials||[]).map(c=>({type:c.type,id:b64ToBuf(c.id),transports:c.transports})),userVerification:pk.userVerification||'preferred'}});
+    const authRes=await fetch('/api/webauthn/login/finish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:cred.id,rawId:bufToB64(cred.rawId),type:cred.type,response:{authenticatorData:bufToB64(cred.response.authenticatorData),clientDataJSON:bufToB64(cred.response.clientDataJSON),signature:bufToB64(cred.response.signature)}})});
+    if(!authRes.ok){$('kill-modal-error').textContent='指纹验证失败';return}
+    await api('POST','/api/sessions/kill',{name:killTargetName});
+    hideKillModal();loadSessionsList();
+  }catch(e){if(e.name!=='NotAllowedError')$('kill-modal-error').textContent='指纹验证失败';}
+});
 
 function connectSession(name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
@@ -477,17 +578,25 @@ function connect(name){
   if(ws)ws.close();
   currentSession=name;
   ptySizeSent=false;
-  fitAddon.fit();
-  const proto=location.protocol==='https:'?'wss:':'ws:';
-  ws=new WebSocket(`${proto}//${location.host}/ws?session=${name}`);
-  ws.binaryType='arraybuffer';
-  ws.onopen=()=>{
-    status.textContent=`Connected: ${name}`;
-    sendResize();
-    ptySizeSent=true;
-    resetWsTimeout();
-    // Termux-style: terminal focused, keyboard hidden until user taps terminal
-  };
+  // Delay fit until after layout settles, then send resize
+  requestAnimationFrame(()=>{
+    fitAddon.fit();
+    const proto=location.protocol==='https:'?'wss:':'ws:';
+    ws=new WebSocket(`${proto}//${location.host}/ws?session=${name}`);
+    ws.binaryType='arraybuffer';
+    ws.onopen=()=>{
+      status.textContent=`Connected: ${name}`;
+      // Re-fit after WS connects to ensure dimensions are correct
+      requestAnimationFrame(()=>{
+        const oldCols=term.cols,oldRows=term.rows;
+        fitAddon.fit();
+        sendResize();
+        // If cols/rows changed after re-fit, send again
+        if(term.cols!==oldCols||term.rows!==oldRows)sendResize();
+      });
+      ptySizeSent=true;
+      resetWsTimeout();
+    };
   ws.onmessage=e=>{
     term.write(e.data instanceof ArrayBuffer?new Uint8Array(e.data):e.data);
     resetWsTimeout();
@@ -506,12 +615,26 @@ function connect(name){
     }
   };
   term.onData(d=>{if(ws?.readyState===WebSocket.OPEN){ws.send(d);resetWsTimeout()}});
+  }); // close requestAnimationFrame
 }
 
 function sendResize(){
   if(!term||!ws||ws.readyState!==WebSocket.OPEN)return;
   ws.send(JSON.stringify({cols:term.cols,rows:term.rows}));
 }
+
+// Debounced resize on terminal container size changes
+let resizeTimer=null;
+const resizeObs=new ResizeObserver(()=>{
+  if(resizeTimer)clearTimeout(resizeTimer);
+  resizeTimer=setTimeout(()=>{
+    if(!term||!fitAddon)return;
+    const oldCols=term.cols,oldRows=term.rows;
+    fitAddon.fit();
+    if(term.cols!==oldCols||term.rows!==oldRows)sendResize();
+  },200);
+});
+if($('terminal-container'))resizeObs.observe($('terminal-container'));
 
 $('logout-btn').addEventListener('click',async()=>{
   currentSession=null;
@@ -522,11 +645,151 @@ $('logout-btn').addEventListener('click',async()=>{
   updateModStatus();
   appView.style.display='none';loginView.style.display='flex';
   $('login-pass').value='';
+  const btn=$('login-btn');btn.disabled=false;btn.classList.remove('loading');btn.innerHTML='<span class="spinner"></span><span class="btn-text">Login</span>';
+  $('login-error').textContent='';$('login-success').textContent='';
+  const fpBtn=$('fingerprint-btn');fpBtn.disabled=false;fpBtn.style.opacity='1';
 });
 
 function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
 
+// ArrayBuffer to base64 (handles large buffers without stack overflow)
+function bufToB64(buf){
+  const bytes=new Uint8Array(buf);
+  let bin='';
+  for(let i=0;i<bytes.length;i+=8192){
+    bin+=String.fromCharCode.apply(null,bytes.subarray(i,i+8192));
+  }
+  return btoa(bin).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+function b64ToBuf(b64){
+  // URL-safe base64 → standard base64
+  b64=b64.replace(/-/g,'+').replace(/_/g,'/');
+  while(b64.length%4)b64+='=';
+  const bin=atob(b64);
+  const buf=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++)buf[i]=bin.charCodeAt(i);
+  return buf;
+}
+
+// ─── WebAuthn / Fingerprint ───
+let webauthnAvailable=false, webauthnRegistered=false;
+
+async function checkWebAuthn(){
+  if(!window.PublicKeyCredential){return}
+  try{
+    const r=await fetch('/api/webauthn/status');
+    if(!r.ok)return;
+    const d=await r.json();
+    webauthnAvailable=d.enabled;
+    webauthnRegistered=d.registered;
+    if(d.enabled&&d.registered){
+      $('fingerprint-btn').style.display='block';
+    }
+    if(d.enabled)updateFpButton();
+  }catch(e){}
+}
+
+// Fingerprint login
+$('fingerprint-btn').addEventListener('click',async()=>{
+  const btn=$('fingerprint-btn');const errEl=$('login-error');errEl.textContent='';
+  if(btn.disabled)return;btn.disabled=true;btn.style.opacity='0.6';
+  try{
+    const optRes=await fetch('/api/webauthn/login/start');
+    if(!optRes.ok){errEl.innerHTML='<span class="error-icon">✗</span>指纹不可用';return}
+    const options=await optRes.json();
+    const pk=options.publicKey||options;
+    const cred=await navigator.credentials.get({
+      publicKey:{
+        challenge:b64ToBuf(pk.challenge),
+        timeout:pk.timeout,
+        rpId:pk.rpId,
+        allowCredentials:(pk.allowCredentials||[]).map(c=>({
+          type:c.type,id:b64ToBuf(c.id),transports:c.transports
+        })),
+        userVerification:pk.userVerification||'preferred'
+      }
+    });
+    const authRes=await fetch('/api/webauthn/login/finish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      id:cred.id,rawId:bufToB64(cred.rawId),type:cred.type,
+      response:{authenticatorData:bufToB64(cred.response.authenticatorData),clientDataJSON:bufToB64(cred.response.clientDataJSON),signature:bufToB64(cred.response.signature)}
+    })});
+    if(authRes.ok){
+      $('login-success').innerHTML='✓ 指纹验证成功';
+      setTimeout(()=>showApp(),300);
+    }else{errEl.innerHTML='<span class="error-icon">✗</span>指纹验证失败';btn.disabled=false;btn.style.opacity='1';}
+  }catch(e){
+    if(e.name!=='NotAllowedError')errEl.innerHTML='<span class="error-icon">✗</span>指纹验证失败: '+e.message;
+    btn.disabled=false;btn.style.opacity='1';
+  }
+});
+
+// Enable fingerprint registration (called from status bar button)
+async function enableFingerprint(){
+  try{
+    const optRes=await fetch('/api/webauthn/register/start');
+    if(!optRes.ok){alert('注册失败');return}
+    const options=await optRes.json();
+    const pk=options.publicKey||options;
+    const cred=await navigator.credentials.create({
+      publicKey:{
+        challenge:b64ToBuf(pk.challenge),
+        rp:pk.rp,user:{
+          id:b64ToBuf(pk.user.id),
+          name:pk.user.name,displayName:pk.user.displayName
+        },
+        pubKeyCredParams:pk.pubKeyCredParams,
+        timeout:pk.timeout,
+        authenticatorSelection:pk.authenticatorSelection||{authenticatorAttachment:'platform',userVerification:'preferred'},
+        attestation:pk.attestation||'none'
+      }
+    });
+    const finRes=await fetch('/api/webauthn/register/finish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      id:cred.id,rawId:bufToB64(cred.rawId),type:cred.type,
+      response:{attestationObject:bufToB64(cred.response.attestationObject),clientDataJSON:bufToB64(cred.response.clientDataJSON)}
+    })});
+    if(finRes.ok){
+      webauthnRegistered=true;
+      updateFpButton();
+      alert('指纹注册成功！下次可以直接用指纹登录');
+    }else{alert('指纹注册失败')}
+  }catch(e){
+    if(e.name!=='NotAllowedError')alert('指纹注册失败: '+e.message);
+  }
+}
+
+async function removeFingerprint(){
+  if(!confirm('确定移除指纹登录？'))return;
+  try{
+    await fetch('/api/webauthn/remove',{method:'POST'});
+    webauthnRegistered=false;
+    updateFpButton();
+    $('fingerprint-btn').style.display='none';
+  }catch(e){}
+}
+
+function updateFpButton(){
+  const section=$('fp-section');
+  const btn=$('fp-toggle-btn');
+  const text=$('fp-toggle-text');
+  if(!webauthnAvailable){section.style.display='none';return}
+  section.style.display='block';
+  if(webauthnRegistered){
+    text.textContent='🔓 指纹已启用（点击移除）';
+    btn.style.borderColor='#238636';
+    btn.style.color='#3fb950';
+    btn.onclick=removeFingerprint;
+  }else{
+    text.textContent='🔒 启用指纹登录';
+    btn.style.borderColor='#30363d';
+    btn.style.color='#58a6ff';
+    btn.onclick=enableFingerprint;
+  }
+}
+
+(async()=>{
+await checkWebAuthn();
 checkSession();
+})();
 setInterval(loadSessionsList,10000);
 </script>
 </body>
