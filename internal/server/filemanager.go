@@ -173,6 +173,12 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 
 		log.Printf("file upload: %s (%d bytes) -> %s", filename, written, destPath)
 		uploaded = append(uploaded, filename)
+
+		// Log file upload activity
+		if s.activities != nil {
+			s.activities.Log(ActivityFileUpload, fmt.Sprintf("Uploaded %s (%d bytes)", filename, written),
+				WithPath(destPath))
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{

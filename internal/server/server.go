@@ -41,6 +41,7 @@ type Server struct {
 	waMu      sync.RWMutex
 	wsConns   map[string]*wsConnState // session name → active WS state
 	wsConnMu  sync.Mutex
+	activities *ActivityStore
 }
 
 // wsConnState tracks WebSocket connection and its tmux process
@@ -100,6 +101,12 @@ func New(cfg *config.Config) *http.Server {
 		log.Printf("webauthn: init error: %v (fingerprint disabled)", err)
 	}
 
+	// Activity store setup
+	actStore, err := NewActivityStore(cfg.WebAuthnDir)
+	if err != nil {
+		log.Printf("activity: store error: %v (activity disabled)", err)
+	}
+
 	s := &Server{
 		cfg:       cfg,
 		mux:       http.NewServeMux(),
@@ -110,6 +117,7 @@ func New(cfg *config.Config) *http.Server {
 		credStore: credStore,
 		webAuthn:  wa,
 		wsConns:   make(map[string]*wsConnState),
+		activities: actStore,
 		upgrade: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				if cfg.AllowAllOrigins {
@@ -220,6 +228,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/webauthn/remove", s.handleWebAuthnRemove)
 	s.mux.HandleFunc("/api/files", s.handleFileManager)
 	s.mux.HandleFunc("/api/system", s.handleSystemInfo)
+	s.mux.HandleFunc("/api/activities", s.handleActivities)
 	s.mux.HandleFunc("/ws", s.handleWebSocket)
 
 	webContent, _ := fs.Sub(webFS, "web")
@@ -327,6 +336,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Close all existing connections on login for clean state
 	s.closeAllConns()
 
+	// Log login activity
+	if s.activities != nil {
+		s.activities.Log(ActivityLogin, "User logged in", WithRemote(r.RemoteAddr))
+	}
+
 	s.session.SetCookie(w)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -336,6 +350,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	// Close all connections on logout
 	s.closeAllConns()
+
+	// Log logout activity
+	if s.activities != nil {
+		s.activities.Log(ActivityLogout, "User logged out", WithRemote(r.RemoteAddr))
+	}
 
 	s.session.ClearCookie(w)
 	w.WriteHeader(http.StatusOK)
@@ -447,6 +466,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer ptmx.Close()
 
 	log.Printf("ws attached: session=%s", sessionName)
+
+	// Log session connection activity
+	if s.activities != nil {
+		s.activities.Log(ActivitySession, fmt.Sprintf("Connected to session %s", sessionName),
+			WithSession(sessionName), WithRemote(r.RemoteAddr))
+	}
 
 	// Handle resize messages from client
 	go func() {

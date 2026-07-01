@@ -111,6 +111,23 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
 #mod-row::-webkit-scrollbar{display:none}
 #mod-row-inner{display:flex;padding:3px 6px;gap:3px;min-width:max-content}
 
+/* Activity panel */
+#activity-panel{padding:12px;overflow-y:auto;flex:1}
+#activity-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
+#activity-header h2{font-size:18px;font-weight:600}
+.activity-item{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 14px;margin-bottom:8px;cursor:pointer;transition:all .15s}
+.activity-item:hover{border-color:#58a6ff;background:#1c2333}
+.activity-item .activity-icon{display:inline-block;width:32px;height:32px;border-radius:50%;text-align:center;line-height:32px;margin-right:10px;font-size:16px}
+.activity-item .activity-icon.login{background:#238636;color:#fff}
+.activity-item .activity-icon.logout{background:#da3633;color:#fff}
+.activity-item .activity-icon.session{background:#1f6feb;color:#fff}
+.activity-item .activity-icon.file{background:#8957e5;color:#fff}
+.activity-item .activity-content{display:inline-block;vertical-align:top;flex:1}
+.activity-item .activity-title{font-size:14px;font-weight:500;color:#c9d1d9}
+.activity-item .activity-time{font-size:12px;color:#8b949e;margin-top:2px}
+.activity-item .activity-detail{font-size:13px;color:#8b949e;margin-top:4px}
+.activity-item .activity-path{font-size:12px;color:#58a6ff;margin-top:2px;font-family:monospace}
+
 /* Session panel */
 #sessions-panel{padding:12px;overflow-y:auto;flex:1}
 .session-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px 14px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between}
@@ -233,15 +250,31 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
   <div id="header">
     <h1>webtmux</h1>
     <div id="tabs">
-      <div class="tab active" data-tab="terminal">Terminal</div>
+      <div class="tab active" data-tab="activity">Activity</div>
+      <div class="tab" data-tab="terminal">Terminal</div>
       <div class="tab" data-tab="sessions">Sessions</div>
       <div class="tab" data-tab="plugins">Plugins</div>
     </div>
     <button id="logout-btn" class="btn btn-outline" title="Logout"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg></button>
   </div>
 
+  <!-- Activity tab (default) -->
+  <div class="tab-content active" id="tab-activity">
+    <div id="activity-panel">
+      <div id="activity-header">
+        <h2>最近活动</h2>
+        <button class="btn btn-outline" id="refresh-activity">刷新</button>
+      </div>
+      <div id="activity-list"></div>
+      <div id="activity-empty" style="display:none;text-align:center;padding:40px;color:#8b949e">
+        <p>暂无活动记录</p>
+        <p style="font-size:13px;margin-top:8px">登录会话、上传文件等操作会显示在这里</p>
+      </div>
+    </div>
+  </div>
+
   <!-- Terminal tab -->
-  <div class="tab-content active" id="tab-terminal">
+  <div class="tab-content" id="tab-terminal">
     <div id="terminal-wrap"><div id="terminal-container"></div></div>
     <div id="toolbar" style="display:none"><div id="toolbar-row"></div></div>
     <div id="mod-row" style="display:none"><div id="mod-row-inner"></div></div>
@@ -435,6 +468,7 @@ document.querySelectorAll('.tab').forEach(t=>{
     document.querySelectorAll('.tab-content').forEach(x=>x.classList.remove('active'));
     t.classList.add('active');
     $('tab-'+t.dataset.tab).classList.add('active');
+    if(t.dataset.tab==='activity') loadActivities();
     if(t.dataset.tab==='sessions') loadSessionsList();
     if(t.dataset.tab==='plugins') renderPlugins();
   });
@@ -600,6 +634,7 @@ function showApp(){
   $('toolbar').style.display='block';$('mod-row').style.display='block';
   buildToolbar();buildModRow();initTerminal();loadSessionsList();
   updateFpButton();
+  loadActivities(); // Load activity feed on app start
 }
 
 function initTerminal(){
@@ -655,6 +690,104 @@ function resetWsTimeout(){
   }
 }
 
+
+
+// ─── Activity management ───
+const ACTIVITY_ICONS = {
+  login: ' ',
+  logout: ' ',
+  session: ' ',
+  file_upload: ' ',
+  file_delete: ' ️',
+  mkdir: ' '
+};
+
+const ACTIVITY_LABELS = {
+  login: '登录',
+  logout: '登出',
+  session: '会话',
+  file_upload: '上传文件',
+  file_delete: '删除文件',
+  mkdir: '创建文件夹'
+};
+
+function formatActivityTime(ts) {
+  const d = new Date(ts);
+  const now = new Date();
+  const diff = (now - d) / 1000;
+  
+  if (diff < 60) return '刚刚';
+  if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前';
+  if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前';
+  if (diff < 604800) return Math.floor(diff / 86400) + ' 天前';
+  
+  return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+async function loadActivities() {
+  const el = $('activity-list');
+  const empty = $('activity-empty');
+  el.innerHTML = '';
+  
+  try {
+    const acts = await api('GET', '/api/activities');
+    if (!acts || acts.length === 0) {
+      el.style.display = 'none';
+      empty.style.display = 'block';
+      return;
+    }
+    
+    el.style.display = 'block';
+    empty.style.display = 'none';
+    
+    acts.forEach(act => {
+      const item = document.createElement('div');
+      item.className = 'activity-item';
+      
+      const icon = ACTIVITY_ICONS[act.type] || ' ';
+      const label = ACTIVITY_LABELS[act.type] || act.type;
+      
+      let detailHtml = '';
+      if (act.detail) detailHtml += `<div class="activity-detail">${esc(act.detail)}</div>`;
+      if (act.session) detailHtml += `<div class="activity-path">会话: ${esc(act.session)}</div>`;
+      if (act.path) detailHtml += `<div class="activity-path">路径: ${esc(act.path)}</div>`;
+      
+      item.innerHTML = `
+        <span class="activity-icon ${act.type}">${icon}</span>
+        <div class="activity-content">
+          <div class="activity-title">${label}</div>
+          <div class="activity-time">${formatActivityTime(act.timestamp)}</div>
+          ${detailHtml}
+        </div>
+      `;
+      
+      // Click to navigate
+      item.addEventListener('click', () => {
+        if (act.type === 'session' && act.session) {
+          // Switch to terminal and connect to session
+          document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+          document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+          document.querySelector('[data-tab="terminal"]').classList.add('active');
+          $('tab-terminal').classList.add('active');
+          connectSession(act.session);
+        } else if (act.type === 'file_upload' || act.type === 'mkdir') {
+          // Switch to plugins and open file manager
+          document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+          document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+          document.querySelector('[data-tab="plugins"]').classList.add('active');
+          $('tab-plugins').classList.add('active');
+          renderPlugins();
+        }
+      });
+      
+      el.appendChild(item);
+    });
+  } catch(e) {
+    el.innerHTML = '<div style="color:#f85149;text-align:center;padding:20px">加载活动记录失败</div>';
+  }
+}
+
+$('refresh-activity').addEventListener('click', loadActivities);
 
 
 // ─── Session management ───
