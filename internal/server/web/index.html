@@ -598,28 +598,23 @@ function renderPlugins(){
 // ─── Connection ───
 function connect(name){
   hideDisconnectOverlay();
-  if(ws)ws.close();
+  if(ws){ws.onclose=null;ws.close()}
   currentSession=name;
   ptySizeSent=false;
-  // Delay fit until after layout settles, then send resize
-  requestAnimationFrame(()=>{
-    fitAddon.fit();
-    const proto=location.protocol==='https:'?'wss:':'ws:';
-    ws=new WebSocket(`${proto}//${location.host}/ws?session=${name}`);
-    ws.binaryType='arraybuffer';
-    ws.onopen=()=>{
-      status.textContent=`Connected: ${name}`;
-      // Re-fit after WS connects to ensure dimensions are correct
-      requestAnimationFrame(()=>{
-        const oldCols=term.cols,oldRows=term.rows;
-        fitAddon.fit();
-        sendResize();
-        // If cols/rows changed after re-fit, send again
-        if(term.cols!==oldCols||term.rows!==oldRows)sendResize();
-      });
-      ptySizeSent=true;
-      resetWsTimeout();
-    };
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  ws=new WebSocket(`${proto}//${location.host}/ws?session=${name}`);
+  ws.binaryType='arraybuffer';
+  ws.onopen=()=>{
+    status.textContent=`Connected: ${name}`;
+    requestAnimationFrame(()=>{
+      const oldCols=term.cols,oldRows=term.rows;
+      fitAddon.fit();
+      sendResize();
+      if(term.cols!==oldCols||term.rows!==oldRows)sendResize();
+    });
+    ptySizeSent=true;
+    resetWsTimeout();
+  };
   ws.onmessage=e=>{
     term.write(e.data instanceof ArrayBuffer?new Uint8Array(e.data):e.data);
     resetWsTimeout();
@@ -639,7 +634,6 @@ function connect(name){
     }
   };
   term.onData(d=>{if(ws?.readyState===WebSocket.OPEN){ws.send(d);resetWsTimeout()}});
-  }); // close requestAnimationFrame
 }
 
 function sendResize(){
