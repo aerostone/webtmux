@@ -10,7 +10,7 @@ import (
 )
 
 func expandHome(path string) string {
-	if len(path) >= 2 && path[:2] == "~" {
+	if len(path) >= 1 && path[0] == '~' {
 		if home, err := os.UserHomeDir(); err == nil {
 			return home + path[1:]
 		}
