@@ -136,11 +136,19 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
 
 /* File Manager Plugin */
 #plugin-panel{padding:0;overflow-y:auto;flex:1}
-.file-manager{display:flex;flex-direction:column;height:100%}
+.plugin-card{background:#161b22;border:1px solid #30363d;border-radius:8px;margin:8px;cursor:pointer;transition:background .2s}
+.plugin-card:hover{background:#1c2333}
+.plugin-card-header{display:flex;align-items:center;gap:12px;padding:14px}
+.plugin-icon{font-size:28px;flex-shrink:0}
+.plugin-info{flex:1}
+.plugin-info h3{font-size:15px;color:#c9d1d9;margin:0 0 4px}
+.plugin-info p{font-size:12px;color:#8b949e;margin:0}
+.plugin-arrow{color:#8b949e;font-size:14px;flex-shrink:0}
+#file-manager-view{display:flex;flex-direction:column;height:100%}
 .fm-toolbar{display:flex;gap:4px;padding:8px;align-items:center;border-bottom:1px solid #21262d}
 .fm-toolbar .key{padding:4px 8px;font-size:12px}
 .fm-path{flex:1;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:6px 8px;font-size:13px;font-family:monospace}
-.fm-list{flex:1;overflow-y:auto;padding:4px}
+.fm-list{flex:1;overflow-y:auto;padding:4px;min-height:200px}
 .fm-item{display:flex;align-items:center;gap:8px;padding:6px 8px;cursor:pointer;border-radius:4px;font-size:13px;color:#c9d1d9}
 .fm-item:hover{background:#161b22}
 .fm-item.dir{color:#58a6ff}
@@ -232,16 +240,31 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
     </div>
   </div>
 
-  <!-- Plugins tab - File Manager -->
+  <!-- Plugins tab - Plugin List + File Manager -->
   <div class="tab-content" id="tab-plugins">
     <div id="plugin-panel">
-      <div class="file-manager">
+      <!-- Plugin list view -->
+      <div id="plugin-list-view">
+        <div class="plugin-card" data-plugin="file-manager">
+          <div class="plugin-card-header">
+            <span class="plugin-icon">📁</span>
+            <div class="plugin-info">
+              <h3>文件管理器</h3>
+              <p>上传、下载、删除文件和文件夹</p>
+            </div>
+            <span class="plugin-arrow">▶</span>
+          </div>
+        </div>
+      </div>
+      <!-- File manager view (hidden by default) -->
+      <div id="file-manager-view" style="display:none">
         <div class="fm-toolbar">
+          <button id="fm-back" class="key" title="返回插件列表">◀</button>
           <button id="fm-home" class="key" title="Home">~</button>
           <button id="fm-up" class="key" title="上级目录">↑</button>
           <button id="fm-refresh" class="key" title="刷新">⟳</button>
           <button id="fm-mkdir" class="key" title="新建文件夹">📁+</button>
-          <input id="fm-path" type="text" value="/" placeholder="路径" />
+          <input id="fm-path" class="fm-path" type="text" value="/" placeholder="路径" />
         </div>
         <div id="fm-list" class="fm-list"></div>
         <div class="fm-upload-area" id="fm-upload-area">
@@ -690,6 +713,7 @@ async function fmMkdir(){
   }catch(e){$('fm-status').textContent='创建失败: '+e.message}
 }
 // File manager event listeners
+$('fm-back').addEventListener('click',()=>{$('file-manager-view').style.display='none';$('plugin-list-view').style.display='block'});
 $('fm-home').addEventListener('click',()=>fmLoadDir('~'));
 $('fm-up').addEventListener('click',()=>{const p=fmCurrentPath.split('/');p.pop();fmLoadDir(p.join('/')||'/')});
 $('fm-refresh').addEventListener('click',()=>fmLoadDir(fmCurrentPath));
@@ -701,8 +725,22 @@ const fmArea=$('fm-upload-area');
 fmArea.addEventListener('dragover',e=>{e.preventDefault();fmArea.classList.add('dragover')});
 fmArea.addEventListener('dragleave',()=>fmArea.classList.remove('dragover'));
 fmArea.addEventListener('drop',e=>{e.preventDefault();fmArea.classList.remove('dragover');fmUpload(e.dataTransfer.files)});
-// Load home dir on tab switch
-function renderPlugins(){fmLoadDir('~')}
+// Plugin list click handlers
+document.querySelectorAll('.plugin-card[data-plugin]').forEach(card=>{
+  card.addEventListener('click',()=>{
+    const plugin=card.dataset.plugin;
+    if(plugin==='file-manager'){
+      $('plugin-list-view').style.display='none';
+      $('file-manager-view').style.display='flex';
+      fmLoadDir('~');
+    }
+  });
+});
+// Render plugins - show plugin list
+function renderPlugins(){
+  $('plugin-list-view').style.display='block';
+  $('file-manager-view').style.display='none';
+}
 
 // ─── Connection ───
 function connect(name){
