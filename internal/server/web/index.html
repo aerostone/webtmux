@@ -165,6 +165,30 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
 .fm-status.uploading{color:#d29922}
 .fm-status.success{color:#3fb950}
 .fm-status.error{color:#f85149}
+/* Quick Commands Plugin */
+.qc-toolbar{display:flex;gap:4px;padding:8px;align-items:center;border-bottom:1px solid #21262d}
+.qc-toolbar .key{padding:4px 8px;font-size:12px}
+.qc-list{flex:1;overflow-y:auto;padding:4px;min-height:200px}
+.qc-item{display:flex;align-items:center;gap:8px;padding:8px 10px;cursor:pointer;border-radius:4px;font-size:13px;color:#c9d1d9;background:#161b22;margin-bottom:4px}
+.qc-item:hover{background:#1c2333}
+.qc-item .qc-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.qc-item .qc-cmd{flex:2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#8b949e;font-family:monospace;font-size:12px}
+.qc-item .qc-run{color:#3fb950;cursor:pointer;padding:4px 8px;border-radius:4px;font-size:11px;background:rgba(63,185,80,0.1)}
+.qc-item .qc-run:hover{background:rgba(63,185,80,0.2)}
+.qc-item .qc-edit{color:#8b949e;cursor:pointer;padding:4px 6px;border-radius:4px;font-size:11px}
+.qc-item .qc-del{color:#f85149;cursor:pointer;padding:4px 6px;border-radius:4px;font-size:11px}
+.qc-status{padding:6px 8px;font-size:11px;color:#8b949e;border-top:1px solid #21262d;min-height:20px}
+/* System Monitor Plugin */
+.sm-toolbar{display:flex;gap:4px;padding:8px;align-items:center;border-bottom:1px solid #21262d}
+.sm-toolbar .key{padding:4px 8px;font-size:12px}
+.sm-toolbar .key.active{background:#238636;color:white}
+.sm-dashboard{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;padding:8px;overflow-y:auto}
+.sm-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px}
+.sm-card-header{font-size:12px;color:#8b949e;margin-bottom:6px;font-weight:500}
+.sm-metric{font-size:20px;font-weight:600;color:#c9d1d9;margin-bottom:8px}
+.sm-bar{height:6px;background:#21262d;border-radius:3px;overflow:hidden}
+.sm-bar-fill{height:100%;background:#58a6ff;border-radius:3px;transition:width 0.3s ease}
+.sm-status{padding:6px 8px;font-size:11px;color:#8b949e;border-top:1px solid #21262d;min-height:20px}
 
 @media(max-width:768px){
   #header{padding:5px 8px;gap:6px}
@@ -255,6 +279,26 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
             <span class="plugin-arrow">▶</span>
           </div>
         </div>
+        <div class="plugin-card" data-plugin="quick-commands">
+          <div class="plugin-card-header">
+            <span class="plugin-icon">⚡</span>
+            <div class="plugin-info">
+              <h3>快捷命令</h3>
+              <p>常用命令片段一键执行</p>
+            </div>
+            <span class="plugin-arrow">▶</span>
+          </div>
+        </div>
+        <div class="plugin-card" data-plugin="system-monitor">
+          <div class="plugin-card-header">
+            <span class="plugin-icon">📊</span>
+            <div class="plugin-info">
+              <h3>系统监控</h3>
+              <p>CPU、内存、磁盘实时状态</p>
+            </div>
+            <span class="plugin-arrow">▶</span>
+          </div>
+        </div>
       </div>
       <!-- File manager view (hidden by default) -->
       <div id="file-manager-view" style="display:none">
@@ -272,6 +316,55 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
           <input type="file" id="fm-file-input" multiple style="display:none" />
         </div>
         <div id="fm-status" class="fm-status"></div>
+      </div>
+      <!-- Quick commands view (hidden by default) -->
+      <div id="quick-commands-view" style="display:none">
+        <div class="qc-toolbar">
+          <button id="qc-back" class="key" title="返回插件列表">◀</button>
+          <button id="qc-add" class="key" title="添加命令">+</button>
+          <button id="qc-import" class="key" title="导入命令">📥</button>
+          <button id="qc-export" class="key" title="导出命令">📤</button>
+        </div>
+        <div id="qc-list" class="qc-list"></div>
+        <div id="qc-status" class="qc-status"></div>
+      </div>
+      <!-- System monitor view (hidden by default) -->
+      <div id="system-monitor-view" style="display:none">
+        <div class="sm-toolbar">
+          <button id="sm-back" class="key" title="返回插件列表">◀</button>
+          <button id="sm-refresh" class="key" title="刷新">⟳</button>
+          <button id="sm-auto" class="key" title="自动刷新">Auto</button>
+        </div>
+        <div id="sm-dashboard" class="sm-dashboard">
+          <div class="sm-card">
+            <div class="sm-card-header">CPU</div>
+            <div id="sm-cpu" class="sm-metric">--</div>
+            <div id="sm-cpu-bar" class="sm-bar"><div class="sm-bar-fill"></div></div>
+          </div>
+          <div class="sm-card">
+            <div class="sm-card-header">内存</div>
+            <div id="sm-mem" class="sm-metric">--</div>
+            <div id="sm-mem-bar" class="sm-bar"><div class="sm-bar-fill"></div></div>
+          </div>
+          <div class="sm-card">
+            <div class="sm-card-header">磁盘</div>
+            <div id="sm-disk" class="sm-metric">--</div>
+            <div id="sm-disk-bar" class="sm-bar"><div class="sm-bar-fill"></div></div>
+          </div>
+          <div class="sm-card">
+            <div class="sm-card-header">负载</div>
+            <div id="sm-load" class="sm-metric">--</div>
+          </div>
+          <div class="sm-card">
+            <div class="sm-card-header">运行时间</div>
+            <div id="sm-uptime" class="sm-metric">--</div>
+          </div>
+          <div class="sm-card">
+            <div class="sm-card-header">进程数</div>
+            <div id="sm-procs" class="sm-metric">--</div>
+          </div>
+        </div>
+        <div id="sm-status" class="sm-status"></div>
       </div>
     </div>
   </div>
@@ -740,7 +833,147 @@ document.querySelectorAll('.plugin-card[data-plugin]').forEach(card=>{
 function renderPlugins(){
   $('plugin-list-view').style.display='block';
   $('file-manager-view').style.display='none';
+  $('quick-commands-view').style.display='none';
+  $('system-monitor-view').style.display='none';
 }
+// ─── Quick Commands Plugin ───
+let qcCommands=JSON.parse(localStorage.getItem('webtmux-qc')||'[]');
+function qcSave(){localStorage.setItem('webtmux-qc',JSON.stringify(qcCommands))}
+function qcRender(){
+  const el=$('qc-list');el.innerHTML='';
+  if(qcCommands.length===0){
+    el.innerHTML='<div style="text-align:center;padding:20px;color:#8b949e">点击 + 添加常用命令</div>';
+    return;
+  }
+  qcCommands.forEach((cmd,i)=>{
+    const div=document.createElement('div');div.className='qc-item';
+    div.innerHTML=`<span class="qc-name" title="${esc(cmd.name)}">${esc(cmd.name)}</span>`+
+      `<span class="qc-cmd" title="${esc(cmd.command)}">${esc(cmd.command)}</span>`+
+      `<span class="qc-run" data-idx="${i}">运行</span>`+
+      `<span class="qc-edit" data-idx="${i}">✏️</span>`+
+      `<span class="qc-del" data-idx="${i}">✕</span>`;
+    el.appendChild(div);
+  });
+  el.querySelectorAll('.qc-run').forEach(btn=>{
+    btn.addEventListener('click',e=>{
+      e.stopPropagation();
+      const cmd=qcCommands[btn.dataset.idx];
+      if(ws&&ws.readyState===WebSocket.OPEN){
+        ws.send(cmd.command+'\n');
+        $('qc-status').textContent='已执行: '+cmd.command;
+      }else{$('qc-status').textContent='未连接，无法执行'}
+    });
+  });
+  el.querySelectorAll('.qc-edit').forEach(btn=>{
+    btn.addEventListener('click',e=>{
+      e.stopPropagation();
+      const idx=parseInt(btn.dataset.idx);
+      qcEdit(idx);
+    });
+  });
+  el.querySelectorAll('.qc-del').forEach(btn=>{
+    btn.addEventListener('click',e=>{
+      e.stopPropagation();
+      const idx=parseInt(btn.dataset.idx);
+      if(confirm(`删除命令 "${qcCommands[idx].name}"?`)){
+        qcCommands.splice(idx,1);qcSave();qcRender();
+      }
+    });
+  });
+}
+function qcEdit(idx){
+  const cmd=idx>=0?qcCommands[idx]:{name:'',command:''};
+  const name=prompt('命令名称:',cmd.name);
+  if(name===null)return;
+  const command=prompt('命令内容:',cmd.command);
+  if(command===null)return;
+  if(!name.trim()||!command.trim()){$('qc-status').textContent='名称和命令不能为空';return}
+  if(idx>=0){qcCommands[idx]={name:name.trim(),command:command.trim()}}
+  else{qcCommands.push({name:name.trim(),command:command.trim()})}
+  qcSave();qcRender();
+}
+function qcImport(){
+  const input=prompt('粘贴JSON格式命令列表:\n[{"name":"名称","command":"命令"}]');
+  if(!input)return;
+  try{
+    const data=JSON.parse(input);
+    if(!Array.isArray(data))throw new Error('不是数组');
+    qcCommands=data.filter(c=>c.name&&c.command);
+    qcSave();qcRender();
+    $('qc-status').textContent='导入成功: '+qcCommands.length+' 条命令';
+  }catch(e){$('qc-status').textContent='导入失败: '+e.message}
+}
+function qcExport(){
+  const json=JSON.stringify(qcCommands,null,2);
+  navigator.clipboard.writeText(json).then(
+    ()=>$('qc-status').textContent='已复制到剪贴板',
+    ()=>$('qc-status').textContent='复制失败，请手动复制'
+  );
+}
+// Quick commands event listeners
+$('qc-back').addEventListener('click',()=>{$('quick-commands-view').style.display='none';$('plugin-list-view').style.display='block'});
+$('qc-add').addEventListener('click',()=>qcEdit(-1));
+$('qc-import').addEventListener('click',qcImport);
+$('qc-export').addEventListener('click',qcExport);
+// ─── System Monitor Plugin ───
+let smAutoRefresh=null;
+async function smRefresh(){
+  try{
+    const r=await fetch('/api/system');
+    if(!r.ok)throw new Error('请求失败');
+    const d=await r.json();
+    $('sm-cpu').textContent=d.cpu+'%';
+    $('sm-cpu-bar').querySelector('.sm-bar-fill').style.width=d.cpu+'%';
+    $('sm-mem').textContent=d.memory.used+'/'+d.memory.total;
+    $('sm-mem-bar').querySelector('.sm-bar-fill').style.width=d.memory.percent+'%';
+    $('sm-disk').textContent=d.disk.used+'/'+d.disk.total;
+    $('sm-disk-bar').querySelector('.sm-bar-fill').style.width=d.disk.percent+'%';
+    $('sm-load').textContent=d.load.join(' ');
+    $('sm-uptime').textContent=d.uptime;
+    $('sm-procs').textContent=d.procs;
+    $('sm-status').textContent='更新于 '+new Date().toLocaleTimeString();
+  }catch(e){$('sm-status').textContent='错误: '+e.message}
+}
+function smToggleAuto(){
+  if(smAutoRefresh){
+    clearInterval(smAutoRefresh);smAutoRefresh=null;
+    $('sm-auto').classList.remove('active');
+    $('sm-status').textContent='自动刷新已关闭';
+  }else{
+    smAutoRefresh=setInterval(smRefresh,3000);
+    $('sm-auto').classList.add('active');
+    $('sm-status').textContent='每3秒自动刷新';
+  }
+}
+// System monitor event listeners
+$('sm-back').addEventListener('click',()=>{
+  if(smAutoRefresh){clearInterval(smAutoRefresh);smAutoRefresh=null}
+  $('system-monitor-view').style.display='none';$('plugin-list-view').style.display='block';
+});
+$('sm-refresh').addEventListener('click',smRefresh);
+$('sm-auto').addEventListener('click',smToggleAuto);
+// Plugin list click handlers
+function initPluginHandlers(){
+  document.querySelectorAll('.plugin-card[data-plugin]').forEach(card=>{
+    card.addEventListener('click',()=>{
+      const plugin=card.dataset.plugin;
+      if(plugin==='file-manager'){
+        $('plugin-list-view').style.display='none';
+        $('file-manager-view').style.display='flex';
+        fmLoadDir('~');
+      }else if(plugin==='quick-commands'){
+        $('plugin-list-view').style.display='none';
+        $('quick-commands-view').style.display='flex';
+        qcRender();
+      }else if(plugin==='system-monitor'){
+        $('plugin-list-view').style.display='none';
+        $('system-monitor-view').style.display='flex';
+        smRefresh();
+      }
+    });
+  });
+}
+initPluginHandlers();
 
 // ─── Connection ───
 function connect(name){
