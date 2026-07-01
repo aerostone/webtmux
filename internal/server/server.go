@@ -189,6 +189,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/webauthn/login/start", s.handleWebAuthnLoginStart)
 	s.mux.HandleFunc("/api/webauthn/login/finish", s.handleWebAuthnLoginFinish)
 	s.mux.HandleFunc("/api/webauthn/remove", s.handleWebAuthnRemove)
+	s.mux.HandleFunc("/api/files", s.handleFileManager)
 	s.mux.HandleFunc("/ws", s.handleWebSocket)
 
 	webContent, _ := fs.Sub(webFS, "web")

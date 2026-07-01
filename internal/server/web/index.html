@@ -134,11 +134,29 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
 #disconnect-overlay .overlay-btn{padding:10px 24px;background:#1f6feb;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;margin-top:8px}
 #disconnect-overlay .overlay-btn:active{background:#388bfd}
 
-/* Plugin area */
-#plugin-panel{padding:12px;overflow-y:auto;flex:1}
-.plugin-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;margin-bottom:8px}
-.plugin-card h3{font-size:14px;margin-bottom:6px;color:#58a6ff}
-.plugin-card p{font-size:12px;color:#8b949e}
+/* File Manager Plugin */
+#plugin-panel{padding:0;overflow-y:auto;flex:1}
+.file-manager{display:flex;flex-direction:column;height:100%}
+.fm-toolbar{display:flex;gap:4px;padding:8px;align-items:center;border-bottom:1px solid #21262d}
+.fm-toolbar .key{padding:4px 8px;font-size:12px}
+.fm-path{flex:1;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:6px 8px;font-size:13px;font-family:monospace}
+.fm-list{flex:1;overflow-y:auto;padding:4px}
+.fm-item{display:flex;align-items:center;gap:8px;padding:6px 8px;cursor:pointer;border-radius:4px;font-size:13px;color:#c9d1d9}
+.fm-item:hover{background:#161b22}
+.fm-item.dir{color:#58a6ff}
+.fm-item .fm-icon{width:20px;text-align:center;flex-shrink:0}
+.fm-item .fm-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fm-item .fm-size{color:#8b949e;font-size:11px;flex-shrink:0;width:60px;text-align:right}
+.fm-item .fm-time{color:#8b949e;font-size:11px;flex-shrink:0;width:120px;text-align:right}
+.fm-item .fm-del{color:#f85149;cursor:pointer;padding:2px 6px;border-radius:4px;font-size:11px;visibility:hidden}
+.fm-item:hover .fm-del{visibility:visible}
+.fm-upload-area{border:2px dashed #30363d;border-radius:8px;margin:8px;padding:16px;text-align:center;color:#8b949e;font-size:12px;cursor:pointer;transition:border-color .2s}
+.fm-upload-area.dragover{border-color:#58a6ff;background:rgba(88,166,255,0.05)}
+.fm-upload-link{color:#58a6ff;cursor:pointer;text-decoration:underline}
+.fm-status{padding:6px 8px;font-size:11px;color:#8b949e;border-top:1px solid #21262d;min-height:20px}
+.fm-status.uploading{color:#d29922}
+.fm-status.success{color:#3fb950}
+.fm-status.error{color:#f85149}
 
 @media(max-width:768px){
   #header{padding:5px 8px;gap:6px}
@@ -214,9 +232,25 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
     </div>
   </div>
 
-  <!-- Plugins tab -->
+  <!-- Plugins tab - File Manager -->
   <div class="tab-content" id="tab-plugins">
-    <div id="plugin-panel"></div>
+    <div id="plugin-panel">
+      <div class="file-manager">
+        <div class="fm-toolbar">
+          <button id="fm-home" class="key" title="Home">~</button>
+          <button id="fm-up" class="key" title="上级目录">↑</button>
+          <button id="fm-refresh" class="key" title="刷新">⟳</button>
+          <button id="fm-mkdir" class="key" title="新建文件夹">📁+</button>
+          <input id="fm-path" type="text" value="/" placeholder="路径" />
+        </div>
+        <div id="fm-list" class="fm-list"></div>
+        <div class="fm-upload-area" id="fm-upload-area">
+          <div class="fm-upload-text">拖拽文件到此处上传，或 <label for="fm-file-input" class="fm-upload-link">点击选择</label></div>
+          <input type="file" id="fm-file-input" multiple style="display:none" />
+        </div>
+        <div id="fm-status" class="fm-status"></div>
+      </div>
+    </div>
   </div>
 
   <div id="status">
@@ -582,18 +616,93 @@ function connectSession(name){
   connect(name);
 }
 
-// ─── Plugins ───
-function renderPlugins(){
-  const el=$('plugin-panel');
-  if(plugins.length===0){el.innerHTML='<div class="plugin-card"><h3>No plugins loaded</h3><p>Register plugins via <code>registerPlugin()</code> in console or script modules.</p></div>';return}
-  el.innerHTML='';
-  plugins.forEach(p=>{
-    const card=document.createElement('div');card.className='plugin-card';
-    card.innerHTML=`<h3>${esc(p.name)}</h3><p>${esc(p.description||'')}</p>`;
-    if(p.render){card.appendChild(p.render())}
-    el.appendChild(card);
-  });
+// ─── File Manager Plugin ───
+let fmCurrentPath='/';
+async function fmLoadDir(path){
+  try{
+    const r=await fetch('/api/files?action=list&path='+encodeURIComponent(path));
+    if(!r.ok){const e=await r.json();$('fm-status').textContent='Error: '+e.error;return}
+    const d=await r.json();
+    fmCurrentPath=d.path;
+    $('fm-path').value=d.path;
+    const el=$('fm-list');el.innerHTML='';
+    // Sort: dirs first, then by name
+    const entries=d.entries.sort((a,b)=>(a.is_dir===b.is_dir)?a.name.localeCompare(b.name):(b.is_dir-a.is_dir));
+    entries.forEach(e=>{
+      const div=document.createElement('div');div.className='fm-item'+(e.is_dir?' dir':'');
+      const icon=e.is_dir?'📁':(e.name.match(/\.(jpg|png|gif|svg|webp)$/i)?'🖼':(e.name.match(/\.(mp4|mp3|wav|ogg)$/i)?'🎬':'📄'));
+      div.innerHTML=`<span class="fm-icon">${icon}</span>`+
+        `<span class="fm-name" title="${esc(e.path)}">${esc(e.name)}</span>`+
+        `<span class="fm-size">${e.is_dir?'—':fmFormatSize(e.size)}</span>`+
+        `<span class="fm-time">${e.mod_time}</span>`+
+        `<span class="fm-del" data-path="${esc(e.path)}" data-dir="${e.is_dir}">✕</span>`;
+      if(e.is_dir){div.addEventListener('click',()=>fmLoadDir(e.path))}
+      else{
+        const nameEl=div.querySelector('.fm-name');
+        nameEl.addEventListener('click',()=>fmDownload(e.path));
+      }
+      div.querySelector('.fm-del').addEventListener('click',ev=>{
+        ev.stopPropagation();fmDelete(e.path,e.is_dir);
+      });
+      el.appendChild(div);
+    });
+    $('fm-status').textContent=entries.length+' 项';
+  }catch(e){$('fm-status').textContent='Error: '+e.message}
 }
+function fmFormatSize(bytes){
+  if(bytes<1024)return bytes+'B';
+  if(bytes<1048576)return(bytes/1024).toFixed(1)+'K';
+  if(bytes<1073741824)return(bytes/1048576).toFixed(1)+'M';
+  return(bytes/1073741824).toFixed(1)+'G';
+}
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+async function fmUpload(files){
+  if(!files||files.length===0)return;
+  const status=$('fm-status');status.className='fm-status uploading';status.textContent='上传中...';
+  const fd=new FormData();
+  fd.append('path',fmCurrentPath);
+  for(const f of files)fd.append('files',f);
+  try{
+    const r=await fetch('/api/files?action=upload',{method:'POST',body:fd});
+    const d=await r.json();
+    if(r.ok){status.className='fm-status success';status.textContent='上传成功: '+(d.uploaded||[]).join(', ')}
+    else{status.className='fm-status error';status.textContent='上传失败: '+d.error}
+    fmLoadDir(fmCurrentPath);
+  }catch(e){status.className='fm-status error';status.textContent='上传失败: '+e.message}
+}
+async function fmDelete(path,isDir){
+  if(!confirm('删除 '+path+'?'))return;
+  try{
+    const r=await fetch('/api/files?action=delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});
+    if(r.ok){$('fm-status').textContent='已删除';fmLoadDir(fmCurrentPath)}
+    else{const d=await r.json();$('fm-status').textContent='删除失败: '+d.error}
+  }catch(e){$('fm-status').textContent='删除失败: '+e.message}
+}
+function fmDownload(path){
+  window.open('/api/files?action=download&path='+encodeURIComponent(path),'_blank')}
+async function fmMkdir(){
+  const name=prompt('新文件夹名称:');if(!name)return;
+  const path=fmCurrentPath+'/'+name;
+  try{
+    const r=await fetch('/api/files?action=mkdir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});
+    if(r.ok){fmLoadDir(fmCurrentPath)}
+    else{const d=await r.json();$('fm-status').textContent='创建失败: '+d.error}
+  }catch(e){$('fm-status').textContent='创建失败: '+e.message}
+}
+// File manager event listeners
+$('fm-home').addEventListener('click',()=>fmLoadDir('~'));
+$('fm-up').addEventListener('click',()=>{const p=fmCurrentPath.split('/');p.pop();fmLoadDir(p.join('/')||'/')});
+$('fm-refresh').addEventListener('click',()=>fmLoadDir(fmCurrentPath));
+$('fm-mkdir').addEventListener('click',fmMkdir);
+$('fm-path').addEventListener('keydown',e=>{if(e.key==='Enter')fmLoadDir($('fm-path').value)});
+$('fm-file-input').addEventListener('change',e=>{fmUpload(e.target.files);e.target.value=''});
+// Drag and drop
+const fmArea=$('fm-upload-area');
+fmArea.addEventListener('dragover',e=>{e.preventDefault();fmArea.classList.add('dragover')});
+fmArea.addEventListener('dragleave',()=>fmArea.classList.remove('dragover'));
+fmArea.addEventListener('drop',e=>{e.preventDefault();fmArea.classList.remove('dragover');fmUpload(e.dataTransfer.files)});
+// Load home dir on tab switch
+function renderPlugins(){fmLoadDir('~')}
 
 // ─── Connection ───
 function connect(name){
