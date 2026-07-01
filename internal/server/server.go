@@ -39,8 +39,16 @@ type Server struct {
 	webAuthn  *webauthn.WebAuthn // fallback when origin not detected
 	waCache   map[string]*webauthn.WebAuthn
 	waMu      sync.RWMutex
-	wsConns   map[string]*websocket.Conn // session name → active WS
+	wsConns   map[string]*wsConnState // session name → active WS state
 	wsConnMu  sync.Mutex
+}
+
+// wsConnState tracks WebSocket connection and its tmux process
+// to ensure clean shutdown before accepting new connections
+type wsConnState struct {
+	conn    *websocket.Conn
+	ptmx    tmux.Resizable
+	cmdDone chan struct{} // closed when tmux process exits
 }
 
 type loginRequest struct {
@@ -80,7 +88,7 @@ func New(cfg *config.Config) *http.Server {
 		rateLimit: rateLimit,
 		credStore: credStore,
 		webAuthn:  wa,
-		wsConns:   make(map[string]*websocket.Conn),
+		wsConns:   make(map[string]*wsConnState),
 		upgrade: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				if cfg.AllowAllOrigins {
@@ -372,16 +380,29 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Close old connection for same session (exclusive)
 	s.wsConnMu.Lock()
 	if old, ok := s.wsConns[sessionName]; ok {
-		old.WriteMessage(websocket.CloseMessage,
+		log.Printf("ws closing old connection: session=%s", sessionName)
+		
+		// Send close message to old WebSocket
+		old.conn.WriteMessage(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "replaced by new connection"))
-		old.Close()
-		log.Printf("ws replaced old connection: session=%s", sessionName)
+		old.conn.Close()
+		
+		// Wait for old tmux process to exit (max 2 seconds)
+		select {
+		case <-old.cmdDone:
+			log.Printf("ws old process exited: session=%s", sessionName)
+		case <-time.After(2 * time.Second):
+			log.Printf("ws old process timeout: session=%s (proceeding anyway)", sessionName)
+		}
 	}
-	s.wsConns[sessionName] = conn
+	
+	state := &wsConnState{conn: conn, cmdDone: make(chan struct{})}
+	s.wsConns[sessionName] = state
 	s.wsConnMu.Unlock()
+	
 	defer func() {
 		s.wsConnMu.Lock()
-		if s.wsConns[sessionName] == conn {
+		if s.wsConns[sessionName] == state {
 			delete(s.wsConns, sessionName)
 		}
 		s.wsConnMu.Unlock()
@@ -394,15 +415,18 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			[]byte("error: cannot attach to session"))
 		return
 	}
+	state.ptmx = ptmx
 	defer ptmx.Close()
 
 	log.Printf("ws attached: session=%s", sessionName)
 
 	// Handle resize messages from client
 	go func() {
+		defer close(state.cmdDone) // Signal when tmux process exits
 		for {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
+				log.Printf("ws read error: session=%s err=%v", sessionName, err)
 				break
 			}
 			// Try to parse as resize JSON
@@ -420,6 +444,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			// Regular input
 			if _, err := ptmx.Write(msg); err != nil {
+				log.Printf("ws write error: session=%s err=%v", sessionName, err)
 				break
 			}
 		}
