@@ -39,6 +39,8 @@ type Server struct {
 	webAuthn  *webauthn.WebAuthn // fallback when origin not detected
 	waCache   map[string]*webauthn.WebAuthn
 	waMu      sync.RWMutex
+	wsConns   map[string]*websocket.Conn // session name → active WS
+	wsConnMu  sync.Mutex
 }
 
 type loginRequest struct {
@@ -78,6 +80,7 @@ func New(cfg *config.Config) *http.Server {
 		rateLimit: rateLimit,
 		credStore: credStore,
 		webAuthn:  wa,
+		wsConns:   make(map[string]*websocket.Conn),
 		upgrade: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				if cfg.AllowAllOrigins {
@@ -363,6 +366,24 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+
+	// Close old connection for same session (exclusive)
+	s.wsConnMu.Lock()
+	if old, ok := s.wsConns[sessionName]; ok {
+		old.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "replaced by new connection"))
+		old.Close()
+		log.Printf("ws replaced old connection: session=%s", sessionName)
+	}
+	s.wsConns[sessionName] = conn
+	s.wsConnMu.Unlock()
+	defer func() {
+		s.wsConnMu.Lock()
+		if s.wsConns[sessionName] == conn {
+			delete(s.wsConns, sessionName)
+		}
+		s.wsConnMu.Unlock()
+	}()
 
 	ptmx, err := s.tmux.AttachSession(sessionName)
 	if err != nil {
