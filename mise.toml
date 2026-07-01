@@ -1,0 +1,20 @@
+[tools]
+go = "1.24"
+
+[tasks.lint]
+run = "go vet ./..."
+sources = ["**/*.go"]
+outputs = {auto = true}
+
+[tasks.test]
+run = "go test ./..."
+sources = ["**/*.go"]
+outputs = {auto = true}
+
+[tasks.build]
+run = "go build -o webtmux ./cmd/webtmux"
+sources = ["**/*.go", "web/**"]
+outputs = ["webtmux"]
+
+[tasks.dev]
+run = "go run ./cmd/webtmux"

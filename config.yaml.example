@@ -1,0 +1,20 @@
+# webtmux 配置示例
+listen_addr: ":8080"
+
+# TLS 默认自动启用，证书自动生成在 ~/.webtmux/
+# 如需自定义证书：
+# tls_cert_file: "/path/to/cert.pem"
+# tls_key_file: "/path/to/key.pem"
+
+# 禁用 TLS（不推荐）
+# no_tls: true
+
+auth_pass: "your-strong-password"
+totp_enabled: false
+totp_secret: ""
+session_secret: ""
+max_login_attempts: 5
+login_window_sec: 300
+login_lockout_sec: 900
+ip_whitelist: []
+tmux_socket: ""

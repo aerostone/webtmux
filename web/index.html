@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>webtmux</title>
+<link rel="stylesheet" href="https://registry.npmmirror.com/@xterm/xterm/5.5.0/files/css/xterm.css">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:100vh;height:100dvh;display:flex;flex-direction:column;overflow:hidden;-webkit-user-select:none;user-select:none}
+
+/* Login */
+#login-view{display:flex;align-items:center;justify-content:center;height:100vh}
+#login-box{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:32px;width:320px;max-width:90vw}
+#login-box h1{text-align:center;font-size:20px;margin-bottom:24px}
+#login-box input{width:100%;padding:10px 12px;margin-bottom:12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;transition:border-color .2s}
+#login-box input:focus{outline:none;border-color:#58a6ff}
+#login-box input.error{border-color:#f85149;animation:shake .3s}
+#login-box button{width:100%;padding:10px;background:#238636;color:#fff;border:none;border-radius:6px;font-size:14px;cursor:pointer;transition:all .2s;position:relative}
+#login-box button:hover{background:#2ea043}
+#login-box button:active{transform:scale(.98)}
+#login-box button:disabled{background:#21262d;color:#484f58;cursor:not-allowed;transform:none}
+#login-box button .spinner{display:none;width:16px;height:16px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:spin .6s linear infinite;margin-right:8px;vertical-align:middle}
+#login-box button.loading .spinner{display:inline-block}
+#login-box button.loading .btn-text{opacity:.7}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-4px)}40%,80%{transform:translateX(4px)}}
+#login-error{color:#f85149;font-size:13px;text-align:center;margin-top:8px;min-height:20px;display:flex;align-items:center;justify-content:center;gap:6px}
+#login-error .error-icon{font-size:15px}
+#login-success{color:#3fb950;font-size:13px;text-align:center;margin-top:8px;min-height:20px;display:flex;align-items:center;justify-content:center;gap:6px}
+
+/* App */
+#app-view{display:none;flex-direction:column;height:100vh;height:100dvh}
+
+/* Header */
+#header{background:#161b22;padding:6px 10px;display:flex;align-items:center;gap:8px;border-bottom:1px solid #30363d;flex-shrink:0;flex-wrap:wrap}
+#header h1{font-size:14px;font-weight:600;white-space:nowrap}
+#sessions{flex:1;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:4px 8px;font-size:13px;min-width:0}
+.btn{border:none;border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;white-space:nowrap}
+.btn-green{background:#238636;color:#fff}
+.btn-green:hover{background:#2ea043}
+.btn-red{background:#da3633;color:#fff}
+.btn-red:hover{background:#f85149}
+.btn-outline{background:transparent;color:#8b949e;border:1px solid #30363d}
+.btn-outline:hover{color:#c9d1d9;border-color:#8b949e}
+.btn-blue{background:#1f6feb;color:#fff}
+.btn-blue:hover{background:#388bfd}
+
+/* Tabs */
+#tabs{display:flex;background:#161b22;border-bottom:1px solid #30363d;flex-shrink:0}
+.tab{padding:6px 14px;font-size:12px;cursor:pointer;border-bottom:2px solid transparent;color:#8b949e;transition:all .15s}
+.tab:hover{color:#c9d1d9}
+.tab.active{color:#c9d1d9;border-bottom-color:#58a6ff}
+.tab-content{display:none;flex:1;flex-direction:column;overflow:hidden;min-height:0}
+.tab-content.active{display:flex}
+
+/* Terminal tab */
+#terminal-container{flex:1;overflow:hidden;min-height:0}
+
+/* Toolbar */
+#toolbar{background:#161b22;border-top:1px solid #30363d;flex-shrink:0;overflow-x:auto;scrollbar-width:none}
+#toolbar::-webkit-scrollbar{display:none}
+#toolbar-row{display:flex;padding:4px 6px;gap:3px;min-width:max-content}
+.key{display:inline-flex;align-items:center;justify-content:center;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:6px 10px;font-size:12px;font-weight:500;cursor:pointer;white-space:nowrap;touch-action:manipulation;-webkit-tap-highlight-color:transparent;min-height:36px;min-width:36px;transition:background .1s}
+.key:active{background:#388bfd;color:#fff;border-color:#58a6ff}
+.key.active-mod{background:#1f6feb;color:#fff;border-color:#58a6ff}
+.key.prefix-key{background:#238636;color:#fff;border-color:#2ea043;font-weight:700}
+.key.special{background:#30363d;color:#f0883e;font-weight:600}
+
+/* Modifier row */
+#mod-row{background:#0d1117;border-top:1px solid #21262d;flex-shrink:0;overflow-x:auto;scrollbar-width:none}
+#mod-row::-webkit-scrollbar{display:none}
+#mod-row-inner{display:flex;padding:3px 6px;gap:3px;min-width:max-content}
+
+/* Session panel */
+#sessions-panel{padding:12px;overflow-y:auto;flex:1}
+.session-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:10px 14px;margin-bottom:8px;display:flex;align-items:center;justify-content:space-between}
+.session-card .name{font-weight:600;font-size:14px;color:#58a6ff}
+.session-card .info{font-size:12px;color:#8b949e;margin-top:2px}
+.session-card .actions{display:flex;gap:6px}
+.session-card.attached .name::after{content:" (attached)";color:#f0883e;font-weight:400}
+.create-row{display:flex;gap:8px;margin-bottom:12px}
+.create-row input{flex:1;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;padding:6px 10px;font-size:13px}
+.create-row input:focus{outline:none;border-color:#58a6ff}
+
+/* Status */
+#status{background:#161b22;padding:3px 10px;font-size:11px;color:#8b949e;border-top:1px solid #30363d;flex-shrink:0;display:flex;justify-content:space-between;align-items:center}
+
+/* Plugin area */
+#plugin-panel{padding:12px;overflow-y:auto;flex:1}
+.plugin-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;margin-bottom:8px}
+.plugin-card h3{font-size:14px;margin-bottom:6px;color:#58a6ff}
+.plugin-card p{font-size:12px;color:#8b949e}
+
+/* Dialog overlay */
+.dialog-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:100}
+.dialog{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:24px;width:300px;max-width:90vw}
+.dialog h3{margin-bottom:16px;font-size:16px}
+.dialog input{width:100%;padding:8px 12px;margin-bottom:12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px}
+.dialog input:focus{outline:none;border-color:#58a6ff}
+.dialog .actions{display:flex;gap:8px;justify-content:flex-end}
+
+@media(max-width:768px){
+  #header{padding:5px 8px;gap:6px}
+  #header h1{font-size:13px}
+  .key{padding:5px 8px;font-size:11px;min-height:34px}
+}
+</style>
+</head>
+<body>
+
+<div id="login-view">
+  <div id="login-box">
+    <h1>🔒 webtmux</h1>
+    <input id="login-pass" type="password" placeholder="Password" autocomplete="current-password">
+    <input id="login-totp" type="text" placeholder="TOTP Code (if enabled)" inputmode="numeric" pattern="[0-9]*" maxlength="6" style="display:none">
+    <button id="login-btn"><span class="spinner"></span><span class="btn-text">Login</span></button>
+    <div id="login-error"></div>
+    <div id="login-success"></div>
+  </div>
+</div>
+
+<div id="app-view">
+  <div id="header">
+    <h1>webtmux</h1>
+    <div id="tabs">
+      <div class="tab active" data-tab="terminal">Terminal</div>
+      <div class="tab" data-tab="sessions">Sessions</div>
+      <div class="tab" data-tab="plugins">Plugins</div>
+    </div>
+    <button id="logout-btn" class="btn btn-outline">⏻</button>
+  </div>
+
+  <!-- Terminal tab -->
+  <div class="tab-content active" id="tab-terminal">
+    <div id="terminal-container"></div>
+    <div id="toolbar" style="display:none"><div id="toolbar-row"></div></div>
+    <div id="mod-row" style="display:none"><div id="mod-row-inner"></div></div>
+  </div>
+
+  <!-- Sessions tab -->
+  <div class="tab-content" id="tab-sessions">
+    <div id="sessions-panel">
+      <div class="create-row">
+        <input id="new-session-name" placeholder="session name (e.g. web-work)">
+        <button class="btn btn-green" id="create-session-btn">+ New</button>
+      </div>
+      <div id="sessions-list"></div>
+    </div>
+  </div>
+
+  <!-- Plugins tab -->
+  <div class="tab-content" id="tab-plugins">
+    <div id="plugin-panel"></div>
+  </div>
+
+  <div id="status">
+    <span id="status-text">Disconnected</span>
+    <span id="mod-status"></span>
+  </div>
+</div>
+
+<!-- Dialog container -->
+<div id="dialog-root"></div>
+
+<script type="importmap">
+{ "imports": {
+  "@xterm/xterm": "https://esm.run/@xterm/xterm@5.5.0",
+  "@xterm/addon-fit": "https://esm.run/@xterm/addon-fit@0.10.0"
+} }
+</script>
+<script type="module">
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+
+const $=id=>document.getElementById(id);
+const loginView=$('login-view'), appView=$('app-view');
+const status=$('status-text'), modStatus=$('mod-status');
+let ws=null, term=null, fitAddon=null;
+let activeModifiers=new Set();
+
+// ─── Plugin Registry ───
+const plugins=[];
+function registerPlugin(p){ plugins.push(p); p.init?.({send,sendKey,api}); }
+function api(method,path,body){
+  const opts={method,headers:{'Content-Type':'application/json'}};
+  if(body) opts.body=JSON.stringify(body);
+  return fetch(path,opts).then(r=>r.ok?r.json():Promise.reject(r));
+}
+
+// ─── Escape sequences ───
+const E='\x1b';
+const SEQ={Esc:E,Tab:'\t',Enter:'\r',Bksp:'\x7f',Up:E+'[A',Down:E+'[B',Right:E+'[C',Left:E+'[D',Home:E+'[H',End:E+'[F',PgUp:E+'[5~',PgDn:E+'[6~',Ins:E+'[2~',Del:E+'[3~',F1:E+'OP',F2:E+'OQ',F3:E+'OR',F4:E+'OS',F5:E+'[15~',F6:E+'[17~',F7:E+'[18~',F8:E+'[19~',F9:E+'[20~',F10:E+'[21~',F11:E+'[23~',F12:E+'[24~'};
+
+function send(d){if(ws?.readyState===WebSocket.OPEN)ws.send(d)}
+function sendKey(k){
+  if(!ws||ws.readyState!==WebSocket.OPEN)return;
+  let d='';
+  if(SEQ[k]){
+    if(activeModifiers.has('Ctrl')&&['Up','Down','Right','Left'].includes(k)){
+      d=E+'[1;'+{Up:'5A',Down:'5B',Right:'5C',Left:'5D'}[k];
+    }else d=SEQ[k];
+  }else if(k.length===1&&activeModifiers.has('Ctrl')){
+    const c=k.toUpperCase().charCodeAt(0);
+    d=c>=65&&c<=90?String.fromCharCode(c-64):k;
+  }else d=k;
+  ws.send(d);
+}
+
+// ─── Tabs ───
+document.querySelectorAll('.tab').forEach(t=>{
+  t.addEventListener('click',()=>{
+    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(x=>x.classList.remove('active'));
+    t.classList.add('active');
+    $('tab-'+t.dataset.tab).classList.add('active');
+    if(t.dataset.tab==='terminal'){term?.focus();fitAddon?.fit()}
+    if(t.dataset.tab==='sessions') loadSessionsList();
+    if(t.dataset.tab==='plugins') renderPlugins();
+  });
+});
+
+// ─── Modifier row (Termux-style) ───
+const MODIFIERS=[
+  {id:'Ctrl',label:'Ctrl',persistent:true},
+  {id:'Alt',label:'Alt',persistent:true},
+  {id:'Esc',label:'Esc',persistent:false},
+  {id:'Tab',label:'Tab',persistent:false},
+];
+function buildModRow(){
+  modRowInner.innerHTML='';
+  for(const m of MODIFIERS){
+    const el=document.createElement('button');
+    el.className='key'+(m.persistent?'':' special');
+    el.textContent=m.label;
+    el.addEventListener('click',()=>{
+      if(m.persistent){
+        activeModifiers.has(m.id)?activeModifiers.delete(m.id):activeModifiers.add(m.id);
+        el.classList.toggle('active-mod');
+        updateModStatus();
+      }else{sendKey(m.id);term?.focus()}
+    });
+    if(m.persistent){
+      let last=0;
+      el.addEventListener('click',()=>{
+        if(Date.now()-last<300){
+          activeModifiers.clear();
+          modRowInner.querySelectorAll('.key').forEach(k=>k.classList.remove('active-mod'));
+          updateModStatus();
+        }
+        last=Date.now();
+      });
+    }
+    modRowInner.appendChild(el);
+  }
+}
+function updateModStatus(){modStatus.textContent=[...activeModifiers].join('+')?`[${[...activeModifiers].join('+')}]`:''}
+const modRowInner=$('mod-row-inner');
+
+// ─── Toolbar ───
+const TOOLBAR_GROUPS=[
+  {name:'tmux prefix',keys:[{label:'⌃B',send:'\x02',title:'tmux prefix'}]},
+  {name:'tmux window',keys:[{label:'Win▾',combo:'\x02c',title:'new window'},{label:'◀Win',combo:'\x02p',title:'prev window'},{label:'Win▶',combo:'\x02n',title:'next window'},{label:'Kill',combo:'\x02&',title:'kill window'},{label:'List',combo:'\x02w',title:'list windows'}]},
+  {name:'tmux pane',keys:[{label:'|Pane',combo:'\x02%',title:'split vertical'},{label:'—Pane',combo:'\x02"',title:'split horizontal'},{label:'◀Pane',combo:'\x02{LEFT}',title:'focus left'},{label:'Pane▶',combo:'\x02{RIGHT}',title:'focus right'},{label:'Kill○',combo:'\x02x',title:'kill pane'},{label:'Zoom',combo:'\x02z',title:'zoom pane'}]},
+  {name:'tmux session',keys:[{label:'Detach',combo:'\x02d',title:'detach'},{label:'Switch',combo:'\x02s',title:'list sessions'}]},
+  {name:'tmux copy',keys:[{label:'Copy',combo:'\x02[',title:'copy mode'},{label:'Paste',combo:'\x02]',title:'paste buffer'}]},
+  {name:'Ctrl keys',keys:[{label:'⌃C',send:'\x03',title:'interrupt'},{label:'⌃D',send:'\x04',title:'EOF'},{label:'⌃Z',send:'\x1a',title:'suspend'},{label:'⌃L',send:'\x0c',title:'clear'},{label:'⌃R',send:'\x12',title:'reverse search'},{label:'⌃A',send:'\x01',title:'begin line'},{label:'⌃E',send:'\x05',title:'end line'},{label:'⌃K',send:'\x0b',title:'kill line'},{label:'⌃U',send:'\x15',title:'kill all'},{label:'⌃W',send:'\x17',title:'kill word'}]},
+  {name:'Nav',keys:[{label:'↑',send:SEQ.Up},{label:'↓',send:SEQ.Down},{label:'←',send:SEQ.Left},{label:'→',send:SEQ.Right},{label:'PgUp',send:SEQ.PgUp},{label:'PgDn',send:SEQ.PgDn},{label:'Home',send:SEQ.Home},{label:'End',send:SEQ.End}]},
+  {name:'Special',keys:[{label:'Esc',send:SEQ.Esc},{label:'Tab',send:'\t'},{label:'Bksp',send:'\x7f'},{label:'Enter',send:'\r'},{label:'Space',send:' '},{label:'~',send:'~'},{label:'/',send:'/'},{label:'|',send:'|'}]},
+];
+
+function buildToolbar(){
+  toolbarRow.innerHTML='';
+  for(const g of TOOLBAR_GROUPS){
+    const sep=document.createElement('div');
+    sep.style.cssText='width:1px;background:#30363d;margin:2px 4px;flex-shrink:0';
+    toolbarRow.appendChild(sep);
+    for(const k of g.keys){
+      const el=document.createElement('button');
+      el.className='key';if(k.send==='\x02')el.classList.add('prefix-key');
+      el.textContent=k.label;if(k.title)el.title=k.title;
+      if(k.combo){
+        el.addEventListener('click',e=>{e.preventDefault();if(!ws||ws.readyState!==WebSocket.OPEN)return;for(const p of parseCombo(k.combo))ws.send(p);term?.focus()});
+      }else{
+        el.addEventListener('click',e=>{e.preventDefault();sendKey(k.send||k.label);term?.focus()});
+      }
+      el.addEventListener('mousedown',e=>e.preventDefault());
+      toolbarRow.appendChild(el);
+    }
+  }
+}
+const toolbarRow=$('toolbar-row');
+function parseCombo(c){
+  const p=[];let i=0;
+  while(i<c.length){
+    if(c[i]==='\x02'){p.push('\x02');i++}
+    else if(c[i]==='{'){const e=c.indexOf('}',i);if(e===-1){p.push(c.slice(i));break}const n=c.slice(i+1,e);if(SEQ[n])p.push(SEQ[n]);i=e+1}
+    else{p.push(c[i]);i++}
+  }return p;
+}
+
+// ─── Login ───
+$('login-btn').addEventListener('click',doLogin);
+$('login-pass').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
+$('login-totp').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
+
+async function doLogin(){
+  const btn=$('login-btn'),errEl=$('login-error'),okEl=$('login-success');
+  const password=$('login-pass').value.trim(),totpCode=$('login-totp').value.trim();
+  
+  // Reset state
+  errEl.textContent='';okEl.textContent='';
+  $('login-pass').classList.remove('error');$('login-totp').classList.remove('error');
+  
+  // Validate
+  if(!password){
+    errEl.innerHTML='<span class="error-icon">⚠</span>请输入密码';
+    $('login-pass').classList.add('error');$('login-pass').focus();
+    return;
+  }
+  
+  // Loading state
+  btn.disabled=true;btn.classList.add('loading');
+  
+  try{
+    const res=await fetch('/api/login',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({password,totp_code:totpCode})
+    });
+    
+    if(res.ok){
+      okEl.innerHTML='✓ 登录成功，正在进入...';
+      btn.innerHTML='<span class="spinner" style="display:inline-block"></span><span class="btn-text">进入中...</span>';
+      setTimeout(()=>showApp(),300);
+    }else if(res.status===429){
+      errEl.innerHTML='<span class="error-icon">🚫</span>尝试次数过多，请稍后再试';
+      $('login-pass').classList.add('error');
+    }else if(res.status===401){
+      const msg=await res.text().catch(()=>'');
+      if(msg.includes('TOTP')){
+        errEl.innerHTML='<span class="error-icon">⚠</span>TOTP 验证码错误';
+        $('login-totp').classList.add('error');$('login-totp').focus();
+      }else{
+        errEl.innerHTML='<span class="error-icon">✗</span>密码错误，请重新输入';
+        $('login-pass').classList.add('error');$('login-pass').focus();
+      }
+    }else{
+      errEl.innerHTML=`<span class="error-icon">✗</span>服务器错误 (${res.status})`;
+    }
+  }catch(e){
+    errEl.innerHTML='<span class="error-icon">✗</span>网络错误，请检查连接';
+  }finally{
+    btn.disabled=false;btn.classList.remove('loading');
+    if(!okEl.textContent){
+      btn.innerHTML='<span class="spinner"></span><span class="btn-text">Login</span>';
+    }
+  }
+}
+
+async function checkSession(){
+  try{
+    const r=await fetch('/api/sessions');
+    if(r.ok)showApp();
+  }catch(e){/* ignore */}
+}
+
+function showApp(){
+  loginView.style.display='none';appView.style.display='flex';
+  $('toolbar').style.display='block';$('mod-row').style.display='block';
+  buildToolbar();buildModRow();initTerminal();loadSessionsList();
+}
+
+function initTerminal(){
+  if(term)return;
+  term=new Terminal({cursorBlink:true,fontSize:14,theme:{background:'#0d1117'}});
+  fitAddon=new FitAddon();term.loadAddon(fitAddon);
+  term.open($('terminal-container'));fitAddon.fit();
+  window.addEventListener('resize',()=>fitAddon.fit());
+}
+
+// ─── Session management ───
+// loadSessions removed — use loadSessionsList instead
+
+async function loadSessionsList(){
+  const el=$('sessions-list');el.innerHTML='';
+  try{
+    const ss=await api('GET','/api/sessions');
+    if(!ss||ss.length===0){el.innerHTML='<div style="color:#8b949e;text-align:center;padding:24px">No sessions. Create one above.</div>';return}
+    ss.forEach(s=>{
+      const card=document.createElement('div');
+      card.className='session-card'+(s.attached>0?' attached':'');
+      card.innerHTML=`<div><div class="name">${esc(s.name)}</div><div class="info">${s.windows} windows · ${s.attached} attached</div></div><div class="actions"><button class="btn btn-blue btn-connect" data-name="${esc(s.name)}">Connect</button><button class="btn btn-red btn-kill" data-name="${esc(s.name)}">Kill</button></div>`;
+      el.appendChild(card);
+    });
+    el.querySelectorAll('.btn-connect').forEach(b=>b.addEventListener('click',()=>connectSession(b.dataset.name)));
+    el.querySelectorAll('.btn-kill').forEach(b=>b.addEventListener('click',async()=>{
+      await api('POST','/api/sessions/kill',{name:b.dataset.name});
+      loadSessionsList();
+    }));
+  }catch(e){el.innerHTML='<div style="color:#f85149">Failed to load sessions</div>'}
+}
+
+$('create-session-btn').addEventListener('click',async()=>{
+  const name=$('new-session-name').value.trim();if(!name)return;
+  await api('POST','/api/sessions/create',{name});
+  $('new-session-name').value='';loadSessionsList();
+});
+$('new-session-name').addEventListener('keydown',e=>{if(e.key==='Enter')$('create-session-btn').click()});
+
+function connectSession(name){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));
+  document.querySelector('[data-tab="terminal"]').classList.add('active');
+  $('tab-terminal').classList.add('active');
+  connect(name);
+}
+
+// ─── Plugins ───
+function renderPlugins(){
+  const el=$('plugin-panel');
+  if(plugins.length===0){
+    el.innerHTML='<div class="plugin-card"><h3>No plugins loaded</h3><p>Register plugins via <code>registerPlugin()</code> in console or script modules.</p></div>';
+    return;
+  }
+  el.innerHTML='';
+  plugins.forEach(p=>{
+    const card=document.createElement('div');card.className='plugin-card';
+    card.innerHTML=`<h3>${esc(p.name)}</h3><p>${esc(p.description||'')}</p>`;
+    if(p.render){card.appendChild(p.render())}
+    el.appendChild(card);
+  });
+}
+
+// ─── Connection ───
+function connect(name){
+  if(ws)ws.close();
+  // wss:// by default; plain ws:// only when page loaded over http://
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  ws=new WebSocket(`${proto}//${location.host}/ws?session=${name}`);
+  ws.binaryType='arraybuffer';
+  ws.onopen=()=>{status.textContent=`Connected: ${name}`;term?.focus()};
+  ws.onmessage=e=>{term.write(e.data instanceof ArrayBuffer?new Uint8Array(e.data):e.data)};
+  ws.onclose=()=>{status.textContent='Disconnected';ws=null};
+  term.onData(d=>{if(ws?.readyState===WebSocket.OPEN)ws.send(d)});
+}
+
+$('logout-btn').addEventListener('click',async()=>{
+  await fetch('/api/logout');if(ws)ws.close();if(term)term.clear();
+  activeModifiers.clear();
+  modRowInner.querySelectorAll('.key').forEach(k=>k.classList.remove('active-mod'));
+  updateModStatus();
+  appView.style.display='none';loginView.style.display='flex';
+  $('login-pass').value='';
+});
+
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+
+// ─── Example plugin (uncomment to test) ───
+// registerPlugin({
+//   name:'Quick Commands',
+//   description:'Frequently used shell commands',
+//   render(){
+//     const d=document.createElement('div');
+//     ['htop','df -h','free -m','uname -a'].forEach(cmd=>{
+//       const b=document.createElement('button');
+//       b.className='btn btn-outline';b.style.margin='4px';b.textContent=cmd;
+//       b.addEventListener('click',()=>{send(cmd+'\r');document.querySelector('[data-tab="terminal"]').click()});
+//       d.appendChild(b);
+//     });
+//     return d;
+//   }
+// });
+
+checkSession();
+setInterval(loadSessionsList,10000);
+</script>
+</body>
+</html>
