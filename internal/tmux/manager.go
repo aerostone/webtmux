@@ -3,8 +3,10 @@ package tmux
 import (
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/creack/pty"
@@ -48,6 +50,7 @@ func (m *Manager) KillSession(name string) error {
 type Resizable interface {
 	io.ReadWriteCloser
 	Resize(cols, rows int) error
+	PID() int
 }
 
 func (m *Manager) AttachSession(name string) (Resizable, error) {
@@ -84,6 +87,13 @@ func (c *ptyConn) Close() error {
 	return nil
 }
 
+func (c *ptyConn) PID() int {
+	if c.cmd.Process != nil {
+		return c.cmd.Process.Pid
+	}
+	return 0
+}
+
 func (c *ptyConn) Resize(cols, rows int) error {
 	return pty.Setsize(c.ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 }
@@ -99,6 +109,25 @@ func splitLines(s string) []string {
 }
 
 func splitPipe(s string) []string { return strings.Split(s, "|") }
+
+// KillOrphan finds and kills orphaned tmux attach-session processes for a specific session.
+// This prevents duplicate input when the server crashes and restarts.
+func KillOrphan(sessionName string) {
+	out, err := exec.Command("pgrep", "-f", "tmux attach-session -t "+sessionName).Output()
+	if err != nil {
+		return // no orphaned process
+	}
+	for _, pidStr := range strings.Fields(strings.TrimSpace(string(out))) {
+		pid, err := strconv.Atoi(strings.TrimSpace(pidStr))
+		if err != nil {
+			continue
+		}
+		if proc, err := os.FindProcess(pid); err == nil {
+			proc.Kill()
+			log.Printf("cleanup: killed orphaned attach handler pid=%d session=%s", pid, sessionName)
+		}
+	}
+}
 
 func parseInt(s string) int {
 	n := 0

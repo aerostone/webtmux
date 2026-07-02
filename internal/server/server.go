@@ -455,6 +455,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		s.wsConnMu.Unlock()
 	}()
 
+	// Kill orphaned attach handler for this session (from previous server crash)
+	tmux.KillOrphan(sessionName)
+
 	ptmx, err := s.tmux.AttachSession(sessionName)
 	if err != nil {
 		log.Printf("ws attach failed: session=%s err=%v", sessionName, err)
