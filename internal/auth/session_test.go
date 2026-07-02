@@ -9,7 +9,7 @@ func TestSessionSetAndValidate(t *testing.T) {
 	sm := NewSessionManager("test-secret-key")
 
 	w := httptest.NewRecorder()
-	sm.SetCookie(w)
+	sm.SetCookie(w, false)
 
 	cookies := w.Result().Cookies()
 	if len(cookies) != 1 {
@@ -42,7 +42,7 @@ func TestSessionRejectsTampered(t *testing.T) {
 	sm := NewSessionManager("test-secret-key")
 
 	w := httptest.NewRecorder()
-	sm.SetCookie(w)
+	sm.SetCookie(w, false)
 	cookie := w.Result().Cookies()[0]
 
 	cookie.Value = cookie.Value[:len(cookie.Value)-2] + "ff"
@@ -58,7 +58,7 @@ func TestSessionDifferentSecrets(t *testing.T) {
 	sm2 := NewSessionManager("secret-2")
 
 	w := httptest.NewRecorder()
-	sm1.SetCookie(w)
+	sm1.SetCookie(w, false)
 	cookie := w.Result().Cookies()[0]
 
 	r := httptest.NewRequest("GET", "/", nil)

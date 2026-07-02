@@ -28,13 +28,14 @@ func NewSessionManager(secret string) *SessionManager {
 	return &SessionManager{secret: []byte(secret)}
 }
 
-func (sm *SessionManager) SetCookie(w http.ResponseWriter) {
+func (sm *SessionManager) SetCookie(w http.ResponseWriter, secure bool) {
 	sig := sm.sign()
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
 		Value:    sig,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(cookieTTL.Seconds()),
 	})

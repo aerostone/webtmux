@@ -52,7 +52,7 @@ func TestLoginRequiredAllowsWithCookie(t *testing.T) {
 	}))
 
 	w1 := httptest.NewRecorder()
-	sm.SetCookie(w1)
+	sm.SetCookie(w1, false)
 	cookie := w1.Result().Cookies()[0]
 
 	req := httptest.NewRequest("GET", "/api/sessions", nil)

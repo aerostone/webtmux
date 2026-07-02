@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"embed"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -206,8 +207,8 @@ func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("X-XSS-Protection", "1; mode=block")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://s4.zstatic.net https://gcore.jsdelivr.net; style-src 'self' 'unsafe-inline' https://s4.zstatic.net; connect-src 'self' wss: ws:; img-src 'self' data:;")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -321,7 +322,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Password != s.cfg.AuthPass {
+	if subtle.ConstantTimeCompare([]byte(req.Password), []byte(s.cfg.AuthPass)) != 1 {
 		s.rateLimit.RecordFailure(key)
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
@@ -345,7 +346,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		s.activities.Log(ActivityLogin, "User logged in", WithRemote(r.RemoteAddr))
 	}
 
-	s.session.SetCookie(w)
+	secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+	s.session.SetCookie(w, secure)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"ok"}`))
@@ -709,7 +711,7 @@ func (s *Server) handleWebAuthnLoginFinish(w http.ResponseWriter, r *http.Reques
 		s.credStore.UpdateSignCount(cred.ID, cred.Authenticator.SignCount)
 	}
 
-	s.session.SetCookie(w)
+	s.session.SetCookie(w, r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https")
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"status":"ok"}`))
 }
