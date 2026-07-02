@@ -26,15 +26,17 @@ fi
 echo "  ✓ 构建成功: $(ls -lh $BINARY_NAME | awk '{print $5}')"
 
 # ─── 2. 安装二进制 ───
-echo "▶ 安装到 $INSTALL_PATH ..."
-sudo cp "$BINARY_NAME" "$INSTALL_PATH"
-sudo chmod 755 "$INSTALL_PATH"
+INSTALL_DIR="/data/develop/golang/webtmux"
+echo "▶ 安装到 $INSTALL_DIR/$BINARY_NAME ..."
+cp "$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
+chmod 755 "$INSTALL_DIR/$BINARY_NAME"
 echo "  ✓ 已安装"
 
 # ─── 3. 安装 systemd 服务 ───
 echo "▶ 安装 systemd 服务 ..."
 mkdir -p "$SYSTEMD_DIR"
-cp "$SERVICE_FILE" "$SYSTEMD_DIR/webtmux.service"
+# 替换 ExecStart 路径为实际安装路径
+sed "s|/usr/local/bin/$BINARY_NAME|$INSTALL_DIR/$BINARY_NAME|g" "$SERVICE_FILE" > "$SYSTEMD_DIR/webtmux.service"
 systemctl --user daemon-reload
 echo "  ✓ 服务文件已安装"
 

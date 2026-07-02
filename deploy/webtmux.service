@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/webtmux -listen :3400
+ExecStart=/data/develop/golang/webtmux/webtmux -listen :3400
 Restart=on-failure
 RestartSec=3
 StandardOutput=journal
