@@ -289,9 +289,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]int{
+	resp := map[string]interface{}{
 		"ws_timeout_sec": s.cfg.WSTimeoutSec,
-	})
+	}
+	if s.cfg.SentryDSN != "" {
+		resp["sentry_dsn"] = s.cfg.SentryDSN
+	}
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {

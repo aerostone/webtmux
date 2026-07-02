@@ -39,6 +39,7 @@ type Config struct {
 	WebAuthnOrigin  string   `json:"webauthn_origin" yaml:"webauthn_origin"`
 	WebAuthnDir     string   `json:"webauthn_dir" yaml:"webauthn_dir"`
 	FileRoots       []string `json:"file_roots" yaml:"file_roots"`
+	SentryDSN       string   `json:"sentry_dsn" yaml:"sentry_dsn"`
 }
 
 func Load() (*Config, error) {
@@ -177,5 +178,8 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("WEBTMUX_FILE_ROOTS"); v != "" {
 		cfg.FileRoots = strings.Split(v, ",")
+	}
+	if v := os.Getenv("WEBTMUX_SENTRY_DSN"); v != "" {
+		cfg.SentryDSN = v
 	}
 }

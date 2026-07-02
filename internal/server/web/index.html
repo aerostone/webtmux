@@ -6,17 +6,22 @@
 <title>webtmux</title>
 <script>
 // Minimal Sentry-compatible error reporter (~1.5KB)
+// DSN is fetched from /api/config at startup (not hardcoded)
 (function(){
-  const DSN='REDACTED_DSN';
-  const p=DSN.split('@');
-  const key=p[0];
-  const hostPath=p[1].split('/');
-  const host=hostPath[0];
-  const pid=hostPath[1];
-  const endpoint='https://'+host+'/api/'+pid+'/store/';
-  let lastSend=0;
+  let DSN='',endpoint='',key='',lastSend=0;
+  function initSentry(dsn){
+    if(!dsn)return;
+    DSN=dsn;
+    const p=DSN.split('@');
+    key=p[0];
+    const hostPath=p[1].split('/');
+    const host=hostPath[0];
+    const pid=hostPath[1];
+    endpoint='https://'+host+'/api/'+pid+'/store/';
+  }
   function uuid(){return Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,'0')).join('')}
   function send(ev){
+    if(!endpoint)return;
     const now=Date.now();if(now-lastSend<5000)return;lastSend=now;
     const body=JSON.stringify({event_id:uuid(),timestamp:new Date().toISOString(),level:'error',platform:'javascript',
       sdk:{name:'webtmux-mini-sentry',version:'1.0.0'},
@@ -38,7 +43,8 @@
     const r=e.reason;send({type:'UnhandledRejection',message:r&&(r.message||String(r))});
   });
   window.Sentry={captureException:function(e){send({type:e.name||'Error',message:e.message||String(e)})},
-    captureMessage:function(m){send({type:'Message',message:m})}};
+    captureMessage:function(m){send({type:'Message',message:m})},
+    init:function(dsn){initSentry(dsn)}};
 })();
 </script>
 <link rel="stylesheet" href="https://s4.zstatic.net/npm/@xterm/xterm@5.5.0/css/xterm.css?v=202607011400">
@@ -462,7 +468,10 @@ let currentSession=null;
 let wsTimeoutSec=300;
 
 // Fetch config from server
-fetch('/api/config').then(r=>r.ok?r.json():{}).then(c=>{if(c.ws_timeout_sec)wsTimeoutSec=c.ws_timeout_sec}).catch(()=>{});
+fetch('/api/config').then(r=>r.ok?r.json():{}).then(c=>{
+  if(c.ws_timeout_sec)wsTimeoutSec=c.ws_timeout_sec;
+  if(c.sentry_dsn)Sentry.init(c.sentry_dsn);
+}).catch(()=>{});
 let wsTimeoutTimer=null;
 
 // ─── Plugin Registry ───
