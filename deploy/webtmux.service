@@ -1,0 +1,23 @@
+[Unit]
+Description=Webtmux - Mobile Web Terminal
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/webtmux -listen :3400
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.webtmux
+
+# Environment (override password via drop-in or env file)
+EnvironmentFile=-%h/.config/webtmux/env
+
+[Install]
+WantedBy=default.target

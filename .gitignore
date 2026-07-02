@@ -20,5 +20,17 @@ Thumbs.db
 # Until-done
 .until-done/
 
-# Config (keep example)
+# Config & secrets
 config.yaml
+*.env
+.env
+deploy/env
+
+# Runtime data
+~/
+*.pem
+credentials.json
+activities.json
+
+# Review artifacts
+.rpiv/
