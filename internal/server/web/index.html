@@ -22,7 +22,7 @@
       sdk:{name:'webtmux-mini-sentry',version:'1.0.0'},
       exception:{values:[{type:ev.type||'Error',value:ev.message||'',stacktrace:{frames:ev.frames||[]}}]},
       message:ev.message||'',tags:{source:ev.source||''}});
-    navigator.sendBeacon(endpoint,new Blob([body],{type:'application/json'}));
+    fetch(endpoint,{method:'POST',credentials:'omit',headers:{'Content-Type':'application/json'},body:body}).catch(()=>{});
   }
   window.onerror=function(msg,src,line,col,err){
     const frames=[];
