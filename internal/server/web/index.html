@@ -173,8 +173,17 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
 .fm-item .fm-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fm-item .fm-size{color:#8b949e;font-size:11px;flex-shrink:0;width:60px;text-align:right}
 .fm-item .fm-time{color:#8b949e;font-size:11px;flex-shrink:0;width:120px;text-align:right}
-.fm-item .fm-del{color:#f85149;cursor:pointer;padding:2px 6px;border-radius:4px;font-size:11px;visibility:hidden}
-.fm-item:hover .fm-del{visibility:visible}
+.fm-item .fm-del{display:none}
+.fm-actions{display:none;gap:8px;align-items:center}
+.fm-item.fm-expanded .fm-actions{display:flex}
+.fm-item.fm-expanded .fm-time{display:none}
+.fm-item.fm-expanded .fm-size{display:none}
+.fm-action{cursor:pointer;padding:4px 8px;border-radius:4px;font-size:13px;font-weight:bold;transition:background .15s}
+.fm-act-download{color:#58a6ff;background:rgba(88,166,255,0.1)}
+.fm-act-download:hover{background:rgba(88,166,255,0.25)}
+.fm-act-delete{color:#f85149;background:rgba(248,81,73,0.1)}
+.fm-act-delete:hover{background:rgba(248,81,73,0.25)}
+.fm-item.dir .fm-actions{display:none}
 .fm-upload-area{border:2px dashed #30363d;border-radius:8px;margin:8px;padding:16px;text-align:center;color:#8b949e;font-size:12px;cursor:pointer;transition:border-color .2s}
 .fm-upload-area.dragover{border-color:#58a6ff;background:rgba(88,166,255,0.05)}
 .fm-upload-link{color:#58a6ff;cursor:pointer;text-decoration:underline}
@@ -926,16 +935,29 @@ async function fmLoadDir(path,pushHistory){
       div.innerHTML=`<span class="fm-icon">${icon}</span>`+
         `<span class="fm-name" title="${esc(e.path)}${e.is_link?' -> '+esc(e.link_target||''):''}">${esc(e.name)}${linkTag}</span>`+
         `<span class="fm-size">${e.is_dir?'—':fmFormatSize(e.size)}</span>`+
-        `<span class="fm-time">${e.mod_time}</span>`+
-        `<span class="fm-del" data-path="${esc(e.path)}" data-dir="${e.is_dir}">✕</span>`;
+        `<span class="fm-time">${e.mod_time}</span>`;
       if(e.is_dir){div.addEventListener('click',()=>fmLoadDir(e.path))}
       else{
-        const nameEl=div.querySelector('.fm-name');
-        nameEl.addEventListener('click',()=>fmDownload(e.path));
+        // File: click to expand actions
+        div.addEventListener('click',ev=>{
+          if(ev.target.closest('.fm-action'))return;
+          // Toggle expanded
+          const wasExpanded=div.classList.contains('fm-expanded');
+          document.querySelectorAll('.fm-item.fm-expanded').forEach(x=>x.classList.remove('fm-expanded'));
+          if(!wasExpanded)div.classList.add('fm-expanded');
+        });
+        // Add action buttons
+        const actions=document.createElement('span');actions.className='fm-actions';
+        actions.innerHTML=`<span class="fm-action fm-act-download" title="下载">↓</span><span class="fm-action fm-act-delete" title="删除">✕</span>`;
+        actions.querySelector('.fm-act-download').addEventListener('click',ev=>{
+          ev.stopPropagation();
+          if(confirm('下载 '+e.name+' ?'))fmDownload(e.path);
+        });
+        actions.querySelector('.fm-act-delete').addEventListener('click',ev=>{
+          ev.stopPropagation();fmDelete(e.path,false);
+        });
+        div.appendChild(actions);
       }
-      div.querySelector('.fm-del').addEventListener('click',ev=>{
-        ev.stopPropagation();fmDelete(e.path,e.is_dir);
-      });
       el.appendChild(div);
     });
     $('fm-status').textContent=entries.length+' 项';
