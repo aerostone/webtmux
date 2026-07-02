@@ -40,6 +40,7 @@ type Config struct {
 	WebAuthnDir     string   `json:"webauthn_dir" yaml:"webauthn_dir"`
 	FileRoots       []string `json:"file_roots" yaml:"file_roots"`
 	SentryDSN       string   `json:"sentry_dsn" yaml:"sentry_dsn"`
+	SessionTimeoutSec int    `json:"session_timeout_sec" yaml:"session_timeout_sec"`
 }
 
 func Load() (*Config, error) {
@@ -56,6 +57,7 @@ func loadWithArgs(args []string) (*Config, error) {
 		WebAuthnRPID:    "localhost",
 		WebAuthnOrigin:  "http://localhost:8080",
 		WebAuthnDir:     "~/.webtmux",
+	SessionTimeoutSec: 7200,
 	}
 
 	fs := flag.NewFlagSet("webtmux", flag.ContinueOnError)
@@ -71,6 +73,7 @@ func loadWithArgs(args []string) (*Config, error) {
 	_ = fs.String("pass", "", "basic auth password")
 	_ = fs.Int("ws-timeout", 0, "WebSocket idle timeout seconds (0=server default)")
 	_ = fs.String("file-roots", "", "comma-separated additional file manager root directories")
+	_ = fs.Int("session-timeout", 0, "session timeout seconds (0=server default 7200)")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -105,6 +108,11 @@ func loadWithArgs(args []string) (*Config, error) {
 		}
 		if f.Name == "ws-timeout" {
 			cfg.WSTimeoutSec = f.Value.(flag.Getter).Get().(int)
+		}
+		if f.Name == "session-timeout" {
+			if v := f.Value.(flag.Getter).Get().(int); v > 0 {
+				cfg.SessionTimeoutSec = v
+			}
 		}
 	})
 
@@ -165,6 +173,11 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("WEBTMUX_WS_TIMEOUT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.WSTimeoutSec = n
+		}
+	}
+	if v := os.Getenv("WEBTMUX_SESSION_TIMEOUT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.SessionTimeoutSec = n
 		}
 	}
 	if v := os.Getenv("WEBTMUX_WEBAUTHN_RPID"); v != "" {

@@ -480,7 +480,10 @@ function registerPlugin(p){ plugins.push(p); p.init?.({send,sendKey,api}); }
 function api(method,path,body){
   const opts={method,headers:{'Content-Type':'application/json'}};
   if(body) opts.body=JSON.stringify(body);
-  return fetch(path,opts).then(r=>r.ok?r.json():Promise.reject(r));
+  return fetch(path,opts).then(r=>{
+    if(r.status===401){showLogin();return Promise.reject(new Error('session expired'));}
+    return r.ok?r.json():Promise.reject(r);
+  });
 }
 
 // ─── Escape sequences ───

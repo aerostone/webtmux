@@ -21,10 +21,13 @@ func LoginRequired(cfg *AuthConfig) func(http.Handler) http.Handler {
 				return
 			}
 			if cfg.Session.Validate(r) {
+				// Sliding window: refresh cookie if needed
+				secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+				cfg.Session.RefreshIfStale(w, r, secure)
 				next.ServeHTTP(w, r)
 				return
 			}
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			http.Error(w, "session expired", http.StatusUnauthorized)
 		})
 	}
 }

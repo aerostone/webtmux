@@ -86,6 +86,11 @@ type createSessionReq struct {
 func New(cfg *config.Config) *http.Server {
 	filter, _ := authpkg.NewIPFilter(cfg.IPWhitelist)
 	session := authpkg.NewSessionManager(cfg.SessionSecret)
+
+	// Set session timeout from config
+	if cfg.SessionTimeoutSec > 0 {
+		authpkg.SessionTimeout = time.Duration(cfg.SessionTimeoutSec) * time.Second
+	}
 	rateLimit := authpkg.NewRateLimiter(
 		cfg.MaxLoginAttempts,
 		time.Duration(cfg.LoginWindowSec)*time.Second,
@@ -292,6 +297,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	resp := map[string]interface{}{
 		"ws_timeout_sec": s.cfg.WSTimeoutSec,
+		"session_timeout_sec": s.cfg.SessionTimeoutSec,
 	}
 	if s.cfg.SentryDSN != "" {
 		resp["sentry_dsn"] = s.cfg.SentryDSN
