@@ -17,27 +17,52 @@ type FileEntry struct {
 	Path    string `json:"path"`
 	Size    int64  `json:"size"`
 	IsDir   bool   `json:"is_dir"`
+	IsLink  bool   `json:"is_link"`
+	LinkTarget string `json:"link_target,omitempty"`
 	ModTime string `json:"mod_time"`
 	Mode    string `json:"mode"`
 }
 
-// validatePath checks if the path is within allowed root directory
-func validatePath(path string) (string, error) {
-	// Get allowed root (default to home directory)
-	root, err := os.UserHomeDir()
-	if err != nil {
-		root = "/"
-	}
-	
+// validatePath checks if the path is within allowed root directories
+func (s *Server) validatePath(path string) (string, error) {
+	// Get allowed roots
+	roots := s.getFileRoots()
+
 	// Clean the path
 	cleaned := filepath.Clean(path)
-	
-	// Check if path is within root
-	if !strings.HasPrefix(cleaned, root) && cleaned != root {
-		return "", fmt.Errorf("access denied: path outside allowed directory")
+
+	// Check if path is within any allowed root
+	for _, root := range roots {
+		if strings.HasPrefix(cleaned, root) || cleaned == root {
+			return cleaned, nil
+		}
 	}
-	
-	return cleaned, nil
+
+	return "", fmt.Errorf("access denied: path outside allowed directories")
+}
+
+// getFileRoots returns list of allowed root directories
+func (s *Server) getFileRoots() []string {
+	roots := []string{}
+
+	// Always include home directory
+	home, err := os.UserHomeDir()
+	if err == nil {
+		roots = append(roots, home)
+	}
+
+	// Add configured extra roots
+	for _, r := range s.cfg.FileRoots {
+		expanded := r
+		if strings.HasPrefix(expanded, "~") {
+			if home != "" {
+				expanded = filepath.Join(home, expanded[1:])
+			}
+		}
+		roots = append(roots, filepath.Clean(expanded))
+	}
+
+	return roots
 }
 
 func (s *Server) handleFileManager(w http.ResponseWriter, r *http.Request) {
@@ -51,11 +76,13 @@ func (s *Server) handleFileManager(w http.ResponseWriter, r *http.Request) {
 	case "download":
 		s.handleFileDownload(w, r)
 	case "delete":
-		s.handleFileDelete(w, r)
+		s.handleFileDelete(w, r, false)
+	case "delete-dir":
+		s.handleFileDelete(w, r, true)
 	case "mkdir":
 		s.handleMkdir(w, r)
 	default:
-		http.Error(w, `{"error":"unknown action, use: list, upload, download, delete, mkdir"}`, http.StatusBadRequest)
+		http.Error(w, `{"error":"unknown action, use: list, upload, download, delete, delete-dir, mkdir"}`, http.StatusBadRequest)
 	}
 }
 
@@ -73,7 +100,7 @@ func (s *Server) handleFileList(w http.ResponseWriter, r *http.Request) {
 
 	// Validate path - prevent path traversal
 	var err error
-	dir, err = validatePath(dir)
+	dir, err = s.validatePath(dir)
 	if err != nil {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 		return
@@ -87,22 +114,43 @@ func (s *Server) handleFileList(w http.ResponseWriter, r *http.Request) {
 
 	result := make([]FileEntry, 0, len(entries))
 	for _, e := range entries {
-		info, err := e.Info()
+		info, err := os.Stat(filepath.Join(dir, e.Name()))
 		if err != nil {
 			continue
 		}
+
+		isLink := e.Type()&os.ModeSymlink != 0
+		var linkTarget string
+		if isLink {
+			linkTarget, _ = os.Readlink(filepath.Join(dir, e.Name()))
+		}
+
 		result = append(result, FileEntry{
-			Name:    e.Name(),
-			Path:    filepath.Join(dir, e.Name()),
-			Size:    info.Size(),
-			IsDir:   e.IsDir(),
-			ModTime: info.ModTime().Format("2006-01-02 15:04:05"),
-			Mode:    info.Mode().String(),
+			Name:       e.Name(),
+			Path:       filepath.Join(dir, e.Name()),
+			Size:       info.Size(),
+			IsDir:      info.IsDir(),
+			IsLink:     isLink,
+			LinkTarget: linkTarget,
+			ModTime:    info.ModTime().Format("2006-01-02 15:04:05"),
+			Mode:       info.Mode().String(),
 		})
+	}
+
+	// Add ".." entry for parent directory (except at root)
+	if dir != "/" {
+		parent := filepath.Dir(dir)
+		result = append([]FileEntry{{
+			Name:  "..",
+			Path:  parent,
+			IsDir: true,
+			Mode:  "drwxr-xr-x",
+		}}, result...)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"path":    dir,
+		"roots":   s.getFileRoots(),
 		"entries": result,
 	})
 }
@@ -132,7 +180,7 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 
 	// Validate path - prevent path traversal
 	var err error
-	destDir, err = validatePath(destDir)
+	destDir, err = s.validatePath(destDir)
 	if err != nil {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 		return
@@ -203,7 +251,7 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 
 	// Validate path - prevent path traversal
 	var err error
-	filePath, err = validatePath(filePath)
+	filePath, err = s.validatePath(filePath)
 	if err != nil {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 		return
@@ -224,7 +272,7 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, filePath)
 }
 
-func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request, isDir bool) {
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error":"POST required"}`, http.StatusMethodNotAllowed)
 		return
@@ -246,18 +294,47 @@ func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 
 	// Validate path - prevent path traversal
 	var err error
-	req.Path, err = validatePath(req.Path)
+	req.Path, err = s.validatePath(req.Path)
 	if err != nil {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 		return
 	}
 
-	if err := os.Remove(req.Path); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	// Check if target exists and is correct type
+	info, err := os.Stat(req.Path)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
 
-	log.Printf("file delete: %s", req.Path)
+	if isDir {
+		if !info.IsDir() {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "not a directory"})
+			return
+		}
+		if err := os.RemoveAll(req.Path); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+	} else {
+		if info.IsDir() {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "use delete-dir for directories"})
+			return
+		}
+		if err := os.Remove(req.Path); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+
+	log.Printf("file delete: %s (dir=%v)", req.Path, isDir)
+
+	// Log activity
+	if s.activities != nil {
+		s.activities.Log(ActivityFileDelete, fmt.Sprintf("Deleted %s", req.Path),
+			WithPath(req.Path))
+	}
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -283,7 +360,7 @@ func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) {
 
 	// Validate path - prevent path traversal
 	var err error
-	req.Path, err = validatePath(req.Path)
+	req.Path, err = s.validatePath(req.Path)
 	if err != nil {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 		return

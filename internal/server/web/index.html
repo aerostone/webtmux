@@ -182,6 +182,11 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
 .fm-status.uploading{color:#d29922}
 .fm-status.success{color:#3fb950}
 .fm-status.error{color:#f85149}
+.fm-roots{display:flex;gap:4px;padding:4px 8px;flex-wrap:wrap;border-bottom:1px solid #21262d}
+.fm-root-btn{padding:2px 8px;font-size:11px;background:#161b22;color:#8b949e;border:1px solid #30363d;border-radius:4px;cursor:pointer}
+.fm-root-btn:hover{color:#c9d1d9;border-color:#58a6ff}
+.fm-hidden-off{opacity:0.4}
+.fm-link-indicator{color:#8b949e;font-size:10px;margin-left:2px}
 /* Quick Commands Plugin */
 .qc-toolbar{display:flex;gap:4px;padding:8px;align-items:center;border-bottom:1px solid #21262d}
 .qc-toolbar .key{padding:4px 8px;font-size:12px}
@@ -242,6 +247,21 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
       <button id="kill-modal-confirm" class="btn btn-red" style="flex:1">确认删除</button>
       <button id="kill-modal-fp" class="btn btn-outline" style="flex:1;display:none">🔒 指纹确认</button>
       <button id="kill-modal-cancel" class="btn btn-outline" style="flex:1">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- File delete confirmation modal -->
+<div id="fm-delete-modal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:1000;align-items:center;justify-content:center">
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;padding:24px;width:320px;max-width:90vw">
+    <h3 style="color:#f85149;margin:0 0 12px;font-size:16px">删除确认</h3>
+    <p style="color:#8b949e;font-size:13px;margin-bottom:16px" id="fm-delete-modal-name"></p>
+    <input id="fm-delete-modal-pass" type="password" placeholder="输入登录密码确认" style="width:100%;padding:10px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;margin-bottom:8px">
+    <div id="fm-delete-modal-error" style="color:#f85149;font-size:12px;margin-bottom:8px;min-height:16px"></div>
+    <div style="display:flex;gap:8px">
+      <button id="fm-delete-modal-confirm" class="btn btn-red" style="flex:1">确认删除</button>
+      <button id="fm-delete-modal-fp" class="btn btn-outline" style="flex:1;display:none">🔒 指纹确认</button>
+      <button id="fm-delete-modal-cancel" class="btn btn-outline" style="flex:1">取消</button>
     </div>
   </div>
 </div>
@@ -337,12 +357,15 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
       <div id="file-manager-view" style="display:none">
         <div class="fm-toolbar">
           <button id="fm-back" class="key" title="返回插件列表">◀</button>
+          <button id="fm-history-back" class="key" title="后退" disabled>◁</button>
           <button id="fm-home" class="key" title="Home">~</button>
           <button id="fm-up" class="key" title="上级目录">↑</button>
           <button id="fm-refresh" class="key" title="刷新">⟳</button>
           <button id="fm-mkdir" class="key" title="新建文件夹">📁+</button>
+          <button id="fm-hidden" class="key" title="显示/隐藏隐藏文件">👁</button>
           <input id="fm-path" class="fm-path" type="text" value="/" placeholder="路径" />
         </div>
+        <div id="fm-roots" class="fm-roots" style="display:none"></div>
         <div id="fm-list" class="fm-list"></div>
         <div class="fm-upload-area" id="fm-upload-area">
           <div class="fm-upload-text">拖拽文件到此处上传，或 <label for="fm-file-input" class="fm-upload-link">点击选择</label></div>
@@ -867,21 +890,41 @@ function connectSession(name){
 
 // ─── File Manager Plugin ───
 let fmCurrentPath='/';
-async function fmLoadDir(path){
+let fmHistory=[];  // Navigation history stack
+let fmShowHidden=false;  // Toggle for hidden files
+let fmDeleteTarget=null;  // {path, isDir}
+async function fmLoadDir(path,pushHistory){
   try{
+    if(pushHistory!==false&&fmCurrentPath&&fmCurrentPath!==path){fmHistory.push(fmCurrentPath)}
     const r=await fetch('/api/files?action=list&path='+encodeURIComponent(path));
     if(!r.ok){const e=await r.json();$('fm-status').textContent='Error: '+e.error;return}
     const d=await r.json();
     fmCurrentPath=d.path;
     $('fm-path').value=d.path;
+    // Update history button state
+    $('fm-history-back').disabled=fmHistory.length===0;
+    // Update roots display
+    if(d.roots&&d.roots.length>1){
+      const rootsEl=$('fm-roots');rootsEl.style.display='flex';rootsEl.innerHTML='';
+      d.roots.forEach(root=>{
+        const btn=document.createElement('button');btn.className='fm-root-btn';
+        const label=root.replace(/^\/home\/[^\/]+/,'~');
+        btn.textContent=label;btn.title=root;
+        btn.addEventListener('click',()=>fmLoadDir(root));
+        rootsEl.appendChild(btn);
+      });
+    }else{$('fm-roots').style.display='none'}
     const el=$('fm-list');el.innerHTML='';
     // Sort: dirs first, then by name
-    const entries=d.entries.sort((a,b)=>(a.is_dir===b.is_dir)?a.name.localeCompare(b.name):(b.is_dir-a.is_dir));
+    let entries=d.entries.sort((a,b)=>(a.is_dir===b.is_dir)?a.name.localeCompare(b.name):(b.is_dir-a.is_dir));
+    // Filter hidden files unless showing them
+    if(!fmShowHidden){entries=entries.filter(e=>e.name==='..'||!e.name.startsWith('.'))}
     entries.forEach(e=>{
       const div=document.createElement('div');div.className='fm-item'+(e.is_dir?' dir':'');
-      const icon=e.is_dir?'📁':(e.name.match(/\.(jpg|png|gif|svg|webp)$/i)?'🖼':(e.name.match(/\.(mp4|mp3|wav|ogg)$/i)?'🎬':'📄'));
+      const icon=e.name==='..'?'↩':(e.is_dir?(e.is_link?'':''):((e.name.match(/\.(jpg|png|gif|svg|webp)$/i)?'️':(e.name.match(/\.(mp4|mp3|wav|ogg)$/i)?'':''))));
+      const linkTag=e.is_link?`<span class="fm-link-indicator">→ ${esc(e.link_target||'')}</span>`:'';
       div.innerHTML=`<span class="fm-icon">${icon}</span>`+
-        `<span class="fm-name" title="${esc(e.path)}">${esc(e.name)}</span>`+
+        `<span class="fm-name" title="${esc(e.path)}${e.is_link?' -> '+esc(e.link_target||''):''}">${esc(e.name)}${linkTag}</span>`+
         `<span class="fm-size">${e.is_dir?'—':fmFormatSize(e.size)}</span>`+
         `<span class="fm-time">${e.mod_time}</span>`+
         `<span class="fm-del" data-path="${esc(e.path)}" data-dir="${e.is_dir}">✕</span>`;
@@ -920,6 +963,13 @@ async function fmUpload(files){
   }catch(e){status.className='fm-status error';status.textContent='上传失败: '+e.message}
 }
 async function fmDelete(path,isDir){
+  // Directory deletion requires authentication
+  if(isDir){
+    fmDeleteTarget={path,isDir};
+    showFmDeleteModal(path);
+    return;
+  }
+  // File deletion - simple confirm
   if(!confirm('删除 '+path+'?'))return;
   try{
     const r=await fetch('/api/files?action=delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});
@@ -938,12 +988,61 @@ async function fmMkdir(){
     else{const d=await r.json();$('fm-status').textContent='创建失败: '+d.error}
   }catch(e){$('fm-status').textContent='创建失败: '+e.message}
 }
+// File delete modal
+function showFmDeleteModal(path){
+  $('fm-delete-modal-name').textContent=path;
+  $('fm-delete-modal-pass').value='';
+  $('fm-delete-modal-error').textContent='';
+  $('fm-delete-modal').style.display='flex';
+  $('fm-delete-modal-fp').style.display=webauthnRegistered?'inline-flex':'none';
+  $('fm-delete-modal-pass').focus();
+}
+function hideFmDeleteModal(){
+  $('fm-delete-modal').style.display='none';
+  fmDeleteTarget=null;
+}
+$('fm-delete-modal-cancel').addEventListener('click',hideFmDeleteModal);
+$('fm-delete-modal').addEventListener('click',e=>{if(e.target===$('fm-delete-modal'))hideFmDeleteModal()});
+$('fm-delete-modal-pass').addEventListener('keydown',e=>{if(e.key==='Enter')$('fm-delete-modal-confirm').click()});
+$('fm-delete-modal-confirm').addEventListener('click',async()=>{
+  if(!fmDeleteTarget)return;
+  const pass=$('fm-delete-modal-pass').value.trim();
+  if(!pass){$('fm-delete-modal-error').textContent='请输入密码';return}
+  try{
+    const res=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pass})});
+    if(!res.ok){$('fm-delete-modal-error').textContent='密码错误';return}
+  }catch(e){$('fm-delete-modal-error').textContent='验证失败';return}
+  try{
+    const r=await fetch('/api/files?action=delete-dir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:fmDeleteTarget.path})});
+    if(r.ok){$('fm-status').textContent='已删除';fmLoadDir(fmCurrentPath)}
+    else{const d=await r.json();$('fm-status').textContent='删除失败: '+d.error}
+  }catch(e){$('fm-status').textContent='删除失败: '+e.message}
+  hideFmDeleteModal();
+});
+$('fm-delete-modal-fp').addEventListener('click',async()=>{
+  if(!fmDeleteTarget)return;
+  try{
+    const optRes=await fetch('/api/webauthn/login/start');
+    if(!optRes.ok){$('fm-delete-modal-error').textContent='指纹不可用';return}
+    const options=await optRes.json();
+    const pk=options.publicKey||options;
+    const cred=await navigator.credentials.get({publicKey:{challenge:b64ToBuf(pk.challenge),timeout:pk.timeout,rpId:pk.rpId,allowCredentials:(pk.allowCredentials||[]).map(c=>({type:c.type,id:b64ToBuf(c.id),transports:c.transports})),userVerification:pk.userVerification||'preferred'}});
+    const authRes=await fetch('/api/webauthn/login/finish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:cred.id,rawId:bufToB64(cred.rawId),type:cred.type,response:{authenticatorData:bufToB64(cred.response.authenticatorData),clientDataJSON:bufToB64(cred.response.clientDataJSON),signature:bufToB64(cred.response.signature)}})});
+    if(!authRes.ok){$('fm-delete-modal-error').textContent='指纹验证失败';return}
+    const r=await fetch('/api/files?action=delete-dir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:fmDeleteTarget.path})});
+    if(r.ok){$('fm-status').textContent='已删除';fmLoadDir(fmCurrentPath)}
+    else{const d=await r.json();$('fm-status').textContent='删除失败: '+d.error}
+  }catch(e){if(e.name!=='NotAllowedError')$('fm-delete-modal-error').textContent='指纹验证失败';}
+  hideFmDeleteModal();
+});
 // File manager event listeners
-$('fm-back').addEventListener('click',()=>{$('file-manager-view').style.display='none';$('plugin-list-view').style.display='block'});
+$('fm-back').addEventListener('click',()=>{$('file-manager-view').style.display='none';$('plugin-list-view').style.display='block';fmHistory=[]});
+$('fm-history-back').addEventListener('click',()=>{if(fmHistory.length>0){const prev=fmHistory.pop();fmLoadDir(prev,false)}});
 $('fm-home').addEventListener('click',()=>fmLoadDir('~'));
 $('fm-up').addEventListener('click',()=>{const p=fmCurrentPath.split('/');p.pop();fmLoadDir(p.join('/')||'/')});
-$('fm-refresh').addEventListener('click',()=>fmLoadDir(fmCurrentPath));
+$('fm-refresh').addEventListener('click',()=>fmLoadDir(fmCurrentPath,false));
 $('fm-mkdir').addEventListener('click',fmMkdir);
+$('fm-hidden').addEventListener('click',()=>{fmShowHidden=!fmShowHidden;$('fm-hidden').classList.toggle('fm-hidden-off',!fmShowHidden);fmLoadDir(fmCurrentPath,false)});
 $('fm-path').addEventListener('keydown',e=>{if(e.key==='Enter')fmLoadDir($('fm-path').value)});
 $('fm-file-input').addEventListener('change',e=>{fmUpload(e.target.files);e.target.value=''});
 // Drag and drop
@@ -951,24 +1050,6 @@ const fmArea=$('fm-upload-area');
 fmArea.addEventListener('dragover',e=>{e.preventDefault();fmArea.classList.add('dragover')});
 fmArea.addEventListener('dragleave',()=>fmArea.classList.remove('dragover'));
 fmArea.addEventListener('drop',e=>{e.preventDefault();fmArea.classList.remove('dragover');fmUpload(e.dataTransfer.files)});
-// Plugin list click handlers
-document.querySelectorAll('.plugin-card[data-plugin]').forEach(card=>{
-  card.addEventListener('click',()=>{
-    const plugin=card.dataset.plugin;
-    if(plugin==='file-manager'){
-      $('plugin-list-view').style.display='none';
-      $('file-manager-view').style.display='flex';
-      fmLoadDir('~');
-    }
-  });
-});
-// Render plugins - show plugin list
-function renderPlugins(){
-  $('plugin-list-view').style.display='block';
-  $('file-manager-view').style.display='none';
-  $('quick-commands-view').style.display='none';
-  $('system-monitor-view').style.display='none';
-}
 // ─── Quick Commands Plugin ───
 let qcCommands=JSON.parse(localStorage.getItem('webtmux-qc')||'[]');
 function qcSave(){localStorage.setItem('webtmux-qc',JSON.stringify(qcCommands))}
@@ -1085,6 +1166,13 @@ $('sm-back').addEventListener('click',()=>{
 });
 $('sm-refresh').addEventListener('click',smRefresh);
 $('sm-auto').addEventListener('click',smToggleAuto);
+// Render plugins - show plugin list
+function renderPlugins(){
+  $('plugin-list-view').style.display='block';
+  $('file-manager-view').style.display='none';
+  $('quick-commands-view').style.display='none';
+  $('system-monitor-view').style.display='none';
+}
 // Plugin list click handlers
 function initPluginHandlers(){
   document.querySelectorAll('.plugin-card[data-plugin]').forEach(card=>{

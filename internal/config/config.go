@@ -38,6 +38,7 @@ type Config struct {
 	WebAuthnRPID    string   `json:"webauthn_rpid" yaml:"webauthn_rpid"`
 	WebAuthnOrigin  string   `json:"webauthn_origin" yaml:"webauthn_origin"`
 	WebAuthnDir     string   `json:"webauthn_dir" yaml:"webauthn_dir"`
+	FileRoots       []string `json:"file_roots" yaml:"file_roots"`
 }
 
 func Load() (*Config, error) {
@@ -68,6 +69,7 @@ func loadWithArgs(args []string) (*Config, error) {
 	_ = fs.String("user", "", "basic auth username")
 	_ = fs.String("pass", "", "basic auth password")
 	_ = fs.Int("ws-timeout", 0, "WebSocket idle timeout seconds (0=server default)")
+	_ = fs.String("file-roots", "", "comma-separated additional file manager root directories")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -91,6 +93,7 @@ func loadWithArgs(args []string) (*Config, error) {
 	applyFlag(fs, "user", func(v string) { cfg.AuthUser = v })
 	applyFlag(fs, "pass", func(v string) { cfg.AuthPass = v })
 	applyFlag(fs, "ip-whitelist", func(v string) { cfg.IPWhitelist = strings.Split(v, ",") })
+	applyFlag(fs, "file-roots", func(v string) { cfg.FileRoots = strings.Split(v, ",") })
 
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "totp" {
@@ -171,5 +174,8 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("WEBTMUX_WEBAUTHN_DIR"); v != "" {
 		cfg.WebAuthnDir = v
+	}
+	if v := os.Getenv("WEBTMUX_FILE_ROOTS"); v != "" {
+		cfg.FileRoots = strings.Split(v, ",")
 	}
 }
