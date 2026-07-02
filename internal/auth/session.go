@@ -20,6 +20,9 @@ const (
 var (
 	// SessionTimeout is the sliding window timeout (default 2h, configurable)
 	SessionTimeout = 2 * time.Hour
+
+	// serverStartTime is set once at process start. Changing it invalidates all old cookies.
+	serverStartTime = time.Now().Unix()
 )
 
 type SessionManager struct {
@@ -87,20 +90,25 @@ func (sm *SessionManager) ClearCookie(w http.ResponseWriter) {
 	})
 }
 
-// signNow creates a signature over "authenticated:<unix_timestamp>".
+// signNow creates a signature over "authenticated:<timestamp>:<server_start>".
 func (sm *SessionManager) signNow() string {
 	ts := time.Now().Unix()
-	payload := fmt.Sprintf("authenticated:%d", ts)
+	payload := fmt.Sprintf("authenticated:%d:%d", ts, serverStartTime)
 	mac := hmac.New(sha256.New, sm.secret)
 	mac.Write([]byte(payload))
 	sig := hex.EncodeToString(mac.Sum(nil))
-	return fmt.Sprintf("%s.%d", sig, ts)
+	return fmt.Sprintf("%s.%d.%d", sig, ts, serverStartTime)
 }
 
 // verifyWithExpiry checks both the HMAC signature and the timestamp expiry.
 func (sm *SessionManager) verifyWithExpiry(token string) bool {
-	sig, ts, ok := parseToken(token)
+	sig, ts, start, ok := parseToken(token)
 	if !ok {
+		return false
+	}
+
+	// Reject cookies from previous server instance
+	if start != serverStartTime {
 		return false
 	}
 
@@ -111,7 +119,7 @@ func (sm *SessionManager) verifyWithExpiry(token string) bool {
 	}
 
 	// Verify HMAC
-	payload := fmt.Sprintf("authenticated:%d", ts)
+	payload := fmt.Sprintf("authenticated:%d:%d", ts, start)
 	mac := hmac.New(sha256.New, sm.secret)
 	mac.Write([]byte(payload))
 	expected := mac.Sum(nil)
@@ -126,22 +134,26 @@ func (sm *SessionManager) verifyWithExpiry(token string) bool {
 
 // extractTimestamp returns the unix timestamp from a token, or -1 if invalid.
 func (sm *SessionManager) extractTimestamp(token string) int64 {
-	_, ts, ok := parseToken(token)
+	_, ts, _, ok := parseToken(token)
 	if !ok {
 		return -1
 	}
 	return ts
 }
 
-// parseToken splits "sig.timestamp" into (sig, timestamp, ok).
-func parseToken(token string) (string, int64, bool) {
-	parts := strings.SplitN(token, ".", 2)
-	if len(parts) != 2 {
-		return "", 0, false
+// parseToken splits "sig.timestamp.serverStart" into (sig, timestamp, serverStart, ok).
+func parseToken(token string) (string, int64, int64, bool) {
+	parts := strings.SplitN(token, ".", 3)
+	if len(parts) != 3 {
+		return "", 0, 0, false
 	}
 	ts, err := strconv.ParseInt(parts[1], 10, 64)
 	if err != nil || ts <= 0 {
-		return "", 0, false
+		return "", 0, 0, false
 	}
-	return parts[0], ts, true
+	start, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || start <= 0 {
+		return "", 0, 0, false
+	}
+	return parts[0], ts, start, true
 }

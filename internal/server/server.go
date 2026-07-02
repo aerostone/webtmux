@@ -144,14 +144,15 @@ func New(cfg *config.Config) *http.Server {
 	s.routes()
 
 	handler := loggingMiddleware(recoveryMiddleware(securityHeaders(
-		authpkg.Middleware(filter)(
-			authpkg.LoginRequired(&authpkg.AuthConfig{
-				Password:    cfg.AuthPass,
-				TOTPSecret:  cfg.TOTPSecret,
-				TOTPEnabled: cfg.TOTPEnabled,
-				Session:     session,
-				RateLimiter: rateLimit,
-			})(s.mux)))))
+		bodyLimitMiddleware(
+			authpkg.Middleware(filter)(
+				authpkg.LoginRequired(&authpkg.AuthConfig{
+					Password:    cfg.AuthPass,
+					TOTPSecret:  cfg.TOTPSecret,
+					TOTPEnabled: cfg.TOTPEnabled,
+					Session:     session,
+					RateLimiter: rateLimit,
+				})(s.mux))))))
 
 	log.Printf("server config: listen=%s ip_whitelist=%v totp=%v",
 		cfg.ListenAddr, len(cfg.IPWhitelist) > 0, cfg.TOTPEnabled)
@@ -213,7 +214,24 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=()")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://s4.zstatic.net https://gcore.jsdelivr.net; style-src 'self' 'unsafe-inline' https://s4.zstatic.net; connect-src 'self' wss: ws:; img-src 'self' data:;")
+		next.ServeHTTP(w, r)
+	})
+}
+
+const maxRequestBodySize = 50 << 20 // 50MB
+
+// bodyLimitMiddleware limits request body size to prevent OOM attacks.
+// Skips WebSocket upgrades and file upload (which has its own limit).
+func bodyLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip for WebSocket and file upload (has its own 100MB limit)
+		if r.URL.Path == "/ws" || (r.URL.Path == "/api/files" && r.URL.Query().Get("action") == "upload") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -654,6 +672,13 @@ func (s *Server) handleWebAuthnLoginStart(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Rate limit WebAuthn login attempts
+	key := s.rateLimit.KeyFromRequest(r.RemoteAddr)
+	if !s.rateLimit.Allow(key) {
+		http.Error(w, "too many attempts, try later", http.StatusTooManyRequests)
+		return
+	}
+
 	user := authpkg.NewWebAuthnUser(s.credStore)
 	assertion, sessionData, err := wa.BeginLogin(user)
 	if err != nil {
@@ -708,6 +733,7 @@ func (s *Server) handleWebAuthnLoginFinish(w http.ResponseWriter, r *http.Reques
 	cred, err := wa.FinishLogin(user, sessionData, r)
 	if err != nil {
 		log.Printf("webauthn login finish error: %v", err)
+		s.rateLimit.RecordFailure(s.rateLimit.KeyFromRequest(r.RemoteAddr))
 		http.Error(w, "authentication failed", http.StatusUnauthorized)
 		return
 	}
@@ -716,6 +742,9 @@ func (s *Server) handleWebAuthnLoginFinish(w http.ResponseWriter, r *http.Reques
 	if cred != nil {
 		s.credStore.UpdateSignCount(cred.ID, cred.Authenticator.SignCount)
 	}
+
+	// Reset rate limit on success
+	s.rateLimit.Reset(s.rateLimit.KeyFromRequest(r.RemoteAddr))
 
 	s.session.SetCookie(w, r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https")
 	w.Header().Set("Content-Type", "application/json")
