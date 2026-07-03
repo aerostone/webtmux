@@ -15,8 +15,9 @@ cd "$PROJECT_DIR"
 
 # ─── 1. 构建 ───
 echo "▶ 构建 $BINARY_NAME ..."
-export GOPROXY=https://goproxy.cn,direct
 export GOTOOLCHAIN=auto
+# 国内用户可设置 GOPROXY=https://goproxy.cn,direct
+export GOPROXY="${GOPROXY:-https://proxy.golang.org,direct}"
 go build -o "$BINARY_NAME" ./cmd/webtmux
 
 if [ ! -f "$BINARY_NAME" ]; then
@@ -26,8 +27,9 @@ fi
 echo "  ✓ 构建成功: $(ls -lh $BINARY_NAME | awk '{print $5}')"
 
 # ─── 2. 安装二进制 ───
-INSTALL_DIR="/data/develop/golang/webtmux"
+INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 echo "▶ 安装到 $INSTALL_DIR/$BINARY_NAME ..."
+mkdir -p "$INSTALL_DIR"
 cp "$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
 chmod 755 "$INSTALL_DIR/$BINARY_NAME"
 echo "  ✓ 已安装"

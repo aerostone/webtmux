@@ -9,8 +9,9 @@ cd "$PROJECT_DIR"
 PORT="${1:-8080}"
 PASS="${2:-dev123}"
 
-export GOPROXY=https://goproxy.cn,direct
 export GOTOOLCHAIN=auto
+# 国内用户可设置 GOPROXY=https://goproxy.cn,direct
+export GOPROXY="${GOPROXY:-https://proxy.golang.org,direct}"
 
 echo "▶ 开发模式启动"
 echo "  端口: $PORT"
