@@ -3,13 +3,14 @@ package tmux
 import (
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 
 	"github.com/creack/pty"
+
+	"github.com/aerostone/webtmux/internal/logger"
 )
 
 type Manager struct {
@@ -124,7 +125,7 @@ func KillOrphan(sessionName string) {
 		}
 		if proc, err := os.FindProcess(pid); err == nil {
 			proc.Kill()
-			log.Printf("cleanup: killed orphaned attach handler pid=%d session=%s", pid, sessionName)
+			logger.Infof("cleanup: killed orphaned attach handler pid=%d session=%s", pid, sessionName)
 		}
 	}
 }

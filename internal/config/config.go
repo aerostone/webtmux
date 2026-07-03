@@ -41,6 +41,9 @@ type Config struct {
 	FileRoots       []string `json:"file_roots" yaml:"file_roots"`
 	SentryDSN       string   `json:"sentry_dsn" yaml:"sentry_dsn"`
 	SessionTimeoutSec int    `json:"session_timeout_sec" yaml:"session_timeout_sec"`
+	LogLevel        string   `json:"log_level" yaml:"log_level"`        // DEBUG, INFO, WARN, ERROR
+	LogDir          string   `json:"log_dir" yaml:"log_dir"`            // log file directory, empty = temp
+	LogMaxAgeDays   int      `json:"log_max_age_days" yaml:"log_max_age_days"` // days to keep logs (default 3)
 }
 
 func Load() (*Config, error) {
@@ -74,6 +77,9 @@ func loadWithArgs(args []string) (*Config, error) {
 	_ = fs.Int("ws-timeout", 0, "WebSocket idle timeout seconds (0=server default)")
 	_ = fs.String("file-roots", "", "comma-separated additional file manager root directories")
 	_ = fs.Int("session-timeout", 0, "session timeout seconds (0=server default 7200)")
+	_ = fs.String("log-level", "", "log level: DEBUG, INFO, WARN, ERROR")
+	_ = fs.String("log-dir", "", "log file directory (default: temp dir)")
+	_ = fs.Int("log-max-age", 0, "days to keep log files (default: 3)")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -98,6 +104,8 @@ func loadWithArgs(args []string) (*Config, error) {
 	applyFlag(fs, "pass", func(v string) { cfg.AuthPass = v })
 	applyFlag(fs, "ip-whitelist", func(v string) { cfg.IPWhitelist = strings.Split(v, ",") })
 	applyFlag(fs, "file-roots", func(v string) { cfg.FileRoots = strings.Split(v, ",") })
+	applyFlag(fs, "log-level", func(v string) { cfg.LogLevel = v })
+	applyFlag(fs, "log-dir", func(v string) { cfg.LogDir = v })
 
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "totp" {
@@ -112,6 +120,11 @@ func loadWithArgs(args []string) (*Config, error) {
 		if f.Name == "session-timeout" {
 			if v := f.Value.(flag.Getter).Get().(int); v > 0 {
 				cfg.SessionTimeoutSec = v
+			}
+		}
+		if f.Name == "log-max-age" {
+			if v := f.Value.(flag.Getter).Get().(int); v > 0 {
+				cfg.LogMaxAgeDays = v
 			}
 		}
 	})
@@ -194,5 +207,11 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("WEBTMUX_SENTRY_DSN"); v != "" {
 		cfg.SentryDSN = v
+	}
+	if v := os.Getenv("WEBTMUX_LOG_LEVEL"); v != "" {
+		cfg.LogLevel = v
+	}
+	if v := os.Getenv("WEBTMUX_LOG_DIR"); v != "" {
+		cfg.LogDir = v
 	}
 }

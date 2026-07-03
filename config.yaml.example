@@ -18,3 +18,8 @@ login_window_sec: 300
 login_lockout_sec: 900
 ip_whitelist: []
 tmux_socket: ""
+
+# 日志配置
+# log_level: "INFO"   # DEBUG, INFO, WARN, ERROR
+# log_dir: ""         # 空表示临时目录
+# log_max_age_days: 3 # 保留天数

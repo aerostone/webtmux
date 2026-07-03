@@ -4,11 +4,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/aerostone/webtmux/internal/logger"
 )
 
 // FileEntry represents a file/directory in the listing
@@ -219,7 +220,7 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("file upload: %s (%d bytes) -> %s", filename, written, destPath)
+		logger.Infof("file upload: %s (%d bytes) -> %s", filename, written, destPath)
 		uploaded = append(uploaded, filename)
 
 		// Log file upload activity
@@ -327,7 +328,7 @@ func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request, isDir 
 		}
 	}
 
-	log.Printf("file delete: %s (dir=%v)", req.Path, isDir)
+	logger.Infof("file delete: %s (dir=%v)", req.Path, isDir)
 
 	// Log activity
 	if s.activities != nil {
@@ -371,7 +372,7 @@ func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("mkdir: %s", req.Path)
+	logger.Infof("mkdir: %s", req.Path)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "path": req.Path})
 }
 

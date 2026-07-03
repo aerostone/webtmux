@@ -96,7 +96,9 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
 
 /* Terminal: fixed-height container, no resize on keyboard */
 #terminal-wrap{flex:1;min-height:0;overflow:hidden;position:relative}
-#terminal-container{width:100%;height:100%;overflow:hidden;touch-action:auto}
+#terminal-container{width:100%;height:100%;overflow:hidden;touch-action:auto;-webkit-user-select:text;user-select:text}
+#terminal-container .xterm{user-select:text;-webkit-user-select:text}
+#terminal-container .xterm-screen{user-select:text;-webkit-user-select:text}
 #terminal-container .xterm-viewport{overflow-y:hidden!important;overflow-x:hidden!important;scrollbar-width:none;-ms-overflow-style:none}
 #terminal-container .xterm-viewport::-webkit-scrollbar{display:none}
 #terminal-container .xterm-screen{overflow:hidden}
@@ -525,31 +527,46 @@ const MODIFIERS=[
   {id:'Alt',label:'Alt',persistent:true},
   {id:'Esc',label:'Esc',persistent:false},
   {id:'Tab',label:'Tab',persistent:false},
+  {id:'Select',label:'Select',persistent:false,action:'selectMode'},
 ];
 const modRowInner=$('mod-row-inner');
+
+// Blur terminal when touching mod-row to prevent keyboard re-opening
+$('mod-row').addEventListener('touchstart',e=>{
+  const active=document.activeElement;
+  if(active&&(active.tagName==='INPUT'||active.tagName==='TEXTAREA'||active.closest('#terminal-container'))){
+    active.blur();
+  }
+},{passive:true});
+
 function buildModRow(){
   modRowInner.innerHTML='';
   for(const m of MODIFIERS){
     const el=document.createElement('button');
     el.className='key'+(m.persistent?'':' special');
     el.textContent=m.label;
-    el.addEventListener('click',()=>{
-      if(m.persistent){
-        activeModifiers.has(m.id)?activeModifiers.delete(m.id):activeModifiers.add(m.id);
-        el.classList.toggle('active-mod');
-        updateModStatus();
-      }else{sendKey(m.id)}
-    });
-    if(m.persistent){
-      let last=0;
+    if(m.action==='selectMode'){
+      el.setAttribute('data-action','selectMode');
+      el.addEventListener('click',()=>toggleSelectMode());
+    }else{
       el.addEventListener('click',()=>{
-        if(Date.now()-last<300){
-          activeModifiers.clear();
-          modRowInner.querySelectorAll('.key').forEach(k=>k.classList.remove('active-mod'));
+        if(m.persistent){
+          activeModifiers.has(m.id)?activeModifiers.delete(m.id):activeModifiers.add(m.id);
+          el.classList.toggle('active-mod');
           updateModStatus();
-        }
-        last=Date.now();
+        }else{sendKey(m.id)}
       });
+      if(m.persistent){
+        let last=0;
+        el.addEventListener('click',()=>{
+          if(Date.now()-last<300){
+            activeModifiers.clear();
+            modRowInner.querySelectorAll('.key').forEach(k=>k.classList.remove('active-mod'));
+            updateModStatus();
+          }
+          last=Date.now();
+        });
+      }
     }
     modRowInner.appendChild(el);
   }
@@ -564,6 +581,7 @@ function sendSeq(...bytes){
 // ─── Toolbar ───
 // Order: prefix → window nav → scroll → pane → copy/paste → session → Ctrl keys → Nav → Special
 let copyModeActive=false;
+let selectModeActive=false;
 const TOOLBAR_GROUPS=[
   {name:'tmux prefix',keys:[{label:'⌃B',send:'\x02',title:'tmux prefix'}]},
   {name:'tmux window',keys:[{label:'◀Win',combo:'\x02p',title:'prev window'},{label:'Win▶',combo:'\x02n',title:'next window'}]},
@@ -576,6 +594,14 @@ const TOOLBAR_GROUPS=[
   {name:'Special',keys:[{label:'Esc',send:SEQ.Esc},{label:'Tab',send:'\t'},{label:'Bksp',send:'\x7f'},{label:'Enter',send:'\r'},{label:'Space',send:' '},{label:'~',send:'~'},{label:'/',send:'/'},{label:'|',send:'|'}]},
 ];
 const toolbarRow=$('toolbar-row');
+
+// Blur terminal when touching toolbar to prevent keyboard re-opening
+$('toolbar').addEventListener('touchstart',e=>{
+  const active=document.activeElement;
+  if(active&&(active.tagName==='INPUT'||active.tagName==='TEXTAREA'||active.closest('#terminal-container'))){
+    active.blur();
+  }
+},{passive:true});
 
 function buildToolbar(){
   toolbarRow.innerHTML='';
@@ -627,12 +653,121 @@ function doScrollAction(action){
     }
     return;
   }
+  if(action==='selectMode'){
+    toggleSelectMode();
+    return;
+  }
   switch(action){
     case 'scrollUp':  sendSeq('\x02[','k','k','k','k','k'); break;
     case 'scrollDown':sendSeq('\x02[','j','j','j','j','j'); break;
     case 'scrollTop': sendSeq('\x02[','g'); break;
     case 'scrollBottom':sendSeq('\x02[','G'); break;
   }
+}
+
+// ─── Select Mode for mobile copy ───
+let selectOverlay=null;
+function toggleSelectMode(){
+  if(selectModeActive){
+    exitSelectMode();
+  }else{
+    enterSelectMode();
+  }
+}
+
+function enterSelectMode(){
+  selectModeActive=true;
+  document.querySelectorAll('[data-action="selectMode"]').forEach(el=>el.classList.add('buf-active'));
+  
+  // Get terminal text content
+  const text=term.select ? getTerminalText() : '';
+  if(!text){
+    exitSelectMode();
+    return;
+  }
+  
+  // Create overlay with selectable text
+  selectOverlay=document.createElement('div');
+  selectOverlay.id='select-overlay';
+  selectOverlay.style.cssText='position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.9);z-index:1000;overflow:auto;padding:20px;';
+  
+  const header=document.createElement('div');
+  header.style.cssText='display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;';
+  
+  const title=document.createElement('span');
+  title.textContent='长按选择文本，然后点击"复制"';
+  title.style.cssText='color:#58a6ff;font-size:14px;';
+  
+  const btnRow=document.createElement('div');
+  btnRow.style.cssText='display:flex;gap:8px;';
+  
+  const copyBtn=document.createElement('button');
+  copyBtn.textContent='复制选中';
+  copyBtn.style.cssText='padding:8px 16px;background:#238636;color:white;border:none;border-radius:6px;font-size:14px;cursor:pointer;';
+  copyBtn.onclick=()=>copySelectedText();
+  
+  const closeBtn=document.createElement('button');
+  closeBtn.textContent='关闭';
+  closeBtn.style.cssText='padding:8px 16px;background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;font-size:14px;cursor:pointer;';
+  closeBtn.onclick=()=>exitSelectMode();
+  
+  btnRow.appendChild(copyBtn);
+  btnRow.appendChild(closeBtn);
+  header.appendChild(title);
+  header.appendChild(btnRow);
+  selectOverlay.appendChild(header);
+  
+  const content=document.createElement('pre');
+  content.textContent=text;
+  content.style.cssText='color:#c9d1d9;font-family:monospace;font-size:13px;line-height:1.5;white-space:pre-wrap;word-break:break-all;user-select:text;-webkit-user-select:text;';
+  selectOverlay.appendChild(content);
+  
+  document.body.appendChild(selectOverlay);
+}
+
+function exitSelectMode(){
+  selectModeActive=false;
+  document.querySelectorAll('[data-action="selectMode"]').forEach(el=>el.classList.remove('buf-active'));
+  if(selectOverlay){
+    selectOverlay.remove();
+    selectOverlay=null;
+  }
+}
+
+function getTerminalText(){
+  // Get text from terminal buffer
+  const buffer=term.buffer.active;
+  let text='';
+  for(let i=0;i<buffer.length;i++){
+    const line=buffer.getLine(i);
+    if(line){
+      text+=line.translateToString(true)+'\n';
+    }
+  }
+  return text.trim();
+}
+
+function copySelectedText(){
+  const selection=window.getSelection();
+  if(selection&&selection.toString()){
+    navigator.clipboard.writeText(selection.toString()).then(()=>{
+      showToast('已复制到剪贴板');
+    }).catch(()=>{
+      // Fallback
+      document.execCommand('copy');
+      showToast('已复制到剪贴板');
+    });
+  }else{
+    showToast('请先选择文本');
+  }
+}
+
+function showToast(msg){
+  const toast=document.createElement('div');
+  toast.textContent=msg;
+  toast.style.cssText='position:fixed;bottom:100px;left:50%;transform:translateX(-50%);background:#238636;color:white;padding:10px 20px;border-radius:8px;font-size:14px;z-index:10000;';
+  document.body.appendChild(toast);
+  setTimeout(()=>toast.remove(),2000);
 }
 
 // Reset copy mode state on WebSocket reconnect
@@ -683,13 +818,45 @@ function showApp(){
 
 function initTerminal(){
   if(term)return;
-  term=new Terminal({cursorBlink:true,fontSize:14,fontFamily:"'Cascadia Code','Fira Code',Menlo,Monaco,'Courier New',monospace",scrollback:5000,theme:{background:'#0d1117'}});
+  term=new Terminal({
+    cursorBlink:true,
+    fontSize:14,
+    fontFamily:"'Cascadia Code','Fira Code',Menlo,Monaco,'Courier New',monospace",
+    scrollback:5000,
+    theme:{background:'#0d1117'},
+    allowProposedApi:true,
+    convertEol:false,
+    scrollOnUserInput:true,
+    rightClickSelectsWord:true,
+    macOptionClickForcesSelection:true
+  });
   const FA=FitAddon.FitAddon||FitAddon;
   fitAddon=new FA();term.loadAddon(fitAddon);
   term.open($('terminal-container'));
   requestAnimationFrame(()=>fitAddon.fit());
+  
+  // Enable native selection on mobile
+  const ua=navigator.userAgent;
+  const isMobile=/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+  if(isMobile){
+    const screen=term.element?.querySelector('.xterm-screen');
+    if(screen){
+      screen.style.userSelect='text';
+      screen.style.webkitUserSelect='text';
+    }
+  }
+  
   // Click terminal area = focus → keyboard on mobile
-  $('terminal-container').addEventListener('click',()=>term.focus());
+  $('terminal-container').addEventListener('click',(e)=>{
+    // Don't focus if clicking on toolbar buttons
+    if(e.target.closest('#toolbar')||e.target.closest('#mod-row')){
+      // Blur terminal to prevent keyboard from reopening
+      const activeEl=document.activeElement;
+      if(activeEl&&activeEl.closest('#terminal-container'))activeEl.blur();
+      return;
+    }
+    term.focus();
+  });
 }
 
 // ─── Disconnect overlay ───

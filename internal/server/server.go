@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -19,6 +18,8 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/gorilla/websocket"
+
+	"github.com/aerostone/webtmux/internal/logger"
 
 	authpkg "github.com/aerostone/webtmux/internal/auth"
 	"github.com/aerostone/webtmux/internal/config"
@@ -64,12 +65,12 @@ func (s *Server) closeAllConns() {
 		return
 	}
 
-	log.Printf("ws closing all connections: count=%d", count)
+	logger.Infof("ws closing all connections: count=%d", count)
 	for name, state := range s.wsConns {
 		state.conn.WriteMessage(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "session ended"))
 		state.conn.Close()
-		log.Printf("ws closed connection: session=%s", name)
+		logger.Infof("ws closed connection: session=%s", name)
 	}
 	s.wsConns = make(map[string]*wsConnState)
 }
@@ -100,17 +101,17 @@ func New(cfg *config.Config) *http.Server {
 	// WebAuthn setup
 	credStore, err := authpkg.NewCredentialStore(cfg.WebAuthnDir)
 	if err != nil {
-		log.Printf("webauthn: credential store error: %v (fingerprint disabled)", err)
+		logger.Warnf("webauthn.*store error: %v (fingerprint disabled)", err)
 	}
 	wa, err := authpkg.NewWebAuthn(cfg.WebAuthnRPID, cfg.WebAuthnOrigin)
 	if err != nil {
-		log.Printf("webauthn: init error: %v (fingerprint disabled)", err)
+		logger.Warnf("webauthn.*init error: %v (fingerprint disabled)", err)
 	}
 
 	// Activity store setup
 	actStore, err := NewActivityStore(cfg.WebAuthnDir)
 	if err != nil {
-		log.Printf("activity: store error: %v (activity disabled)", err)
+		logger.Warnf("activity.*store error: %v (activity disabled)", err)
 	}
 
 	s := &Server{
@@ -154,7 +155,7 @@ func New(cfg *config.Config) *http.Server {
 					RateLimiter: rateLimit,
 				})(s.mux))))))
 
-	log.Printf("server config: listen=%s ip_whitelist=%v totp=%v",
+	logger.Infof("server config: listen=%s ip_whitelist=%v totp=%v",
 		cfg.ListenAddr, len(cfg.IPWhitelist) > 0, cfg.TOTPEnabled)
 
 	return &http.Server{
@@ -190,7 +191,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rw, r)
-		log.Printf("%s %s %d %s %s",
+		logger.Infof("%s %s %d %s %s",
 			r.Method, r.URL.Path, rw.status,
 			time.Since(start).Round(time.Millisecond),
 			r.RemoteAddr)
@@ -201,7 +202,7 @@ func recoveryMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
-				log.Printf("PANIC [%s %s]: %v", r.Method, r.URL.Path, err)
+				logger.Errorf("PANIC [%s %s]: %v", r.Method, r.URL.Path, err)
 				http.Error(w, "internal error", http.StatusInternalServerError)
 			}
 		}()
@@ -291,7 +292,7 @@ func (s *Server) getWebAuthn(r *http.Request) *webauthn.WebAuthn {
 
 	wa, err = authpkg.NewWebAuthn(rpID, origin)
 	if err != nil {
-		log.Printf("webauthn: failed to create instance for %s: %v", origin, err)
+		logger.Warnf("webauthn.*failed to create instance for %s: %v", origin, err)
 		return s.webAuthn
 	}
 
@@ -302,7 +303,7 @@ func (s *Server) getWebAuthn(r *http.Request) *webauthn.WebAuthn {
 	s.waCache[originKey] = wa
 	s.waMu.Unlock()
 
-	log.Printf("webauthn: created instance for rpID=%s origin=%s", rpID, origin)
+	logger.Infof("webauthn: created instance for rpID=%s origin=%s", rpID, origin)
 	return wa
 }
 
@@ -445,11 +446,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("ws connect: session=%s remote=%s", sessionName, r.RemoteAddr)
+	logger.Infof("ws connect: session=%s remote=%s", sessionName, r.RemoteAddr)
 
 	conn, err := s.upgrade.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("ws upgrade failed: %v", err)
+		logger.Errorf("ws upgrade failed: %v", err)
 		return
 	}
 	defer conn.Close()
@@ -457,7 +458,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// Close old connection for same session (exclusive)
 	s.wsConnMu.Lock()
 	if old, ok := s.wsConns[sessionName]; ok {
-		log.Printf("ws closing old connection: session=%s", sessionName)
+		logger.Infof("ws closing old connection: session=%s", sessionName)
 		
 		// Send close message to old WebSocket
 		old.conn.WriteMessage(websocket.CloseMessage,
@@ -467,9 +468,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		// Wait for old tmux process to exit (max 2 seconds)
 		select {
 		case <-old.cmdDone:
-			log.Printf("ws old process exited: session=%s", sessionName)
+			logger.Infof("ws old process exited: session=%s", sessionName)
 		case <-time.After(2 * time.Second):
-			log.Printf("ws old process timeout: session=%s (proceeding anyway)", sessionName)
+			logger.Infof("ws old process timeout: session=%s (proceeding anyway)", sessionName)
 		}
 	}
 	
@@ -490,7 +491,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	ptmx, err := s.tmux.AttachSession(sessionName)
 	if err != nil {
-		log.Printf("ws attach failed: session=%s err=%v", sessionName, err)
+		logger.Errorf("ws attach failed: session=%s err=%v", sessionName, err)
 		conn.WriteMessage(websocket.TextMessage,
 			[]byte("error: cannot attach to session"))
 		return
@@ -498,7 +499,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	state.ptmx = ptmx
 	defer ptmx.Close()
 
-	log.Printf("ws attached: session=%s", sessionName)
+	logger.Infof("ws attached: session=%s", sessionName)
 
 	// Log session connection activity
 	if s.activities != nil {
@@ -512,7 +513,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		for {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
-				log.Printf("ws read error: session=%s err=%v", sessionName, err)
+				logger.Errorf("ws read error: session=%s err=%v", sessionName, err)
 				break
 			}
 			// Try to parse as resize JSON
@@ -522,15 +523,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			if json.Unmarshal(msg, &resizeMsg) == nil && resizeMsg.Cols > 0 && resizeMsg.Rows > 0 {
 				if err := ptmx.Resize(resizeMsg.Cols, resizeMsg.Rows); err != nil {
-					log.Printf("ws resize error: session=%s err=%v", sessionName, err)
+					logger.Errorf("ws resize error: session=%s err=%v", sessionName, err)
 				} else {
-					log.Printf("ws resize: session=%s cols=%d rows=%d", sessionName, resizeMsg.Cols, resizeMsg.Rows)
+					logger.Debugf("ws resize: session=%s cols=%d rows=%d", sessionName, resizeMsg.Cols, resizeMsg.Rows)
 				}
 				continue
 			}
 			// Regular input
 			if _, err := ptmx.Write(msg); err != nil {
-				log.Printf("ws write error: session=%s err=%v", sessionName, err)
+				logger.Errorf("ws write error: session=%s err=%v", sessionName, err)
 				break
 			}
 		}
@@ -541,16 +542,16 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	for {
 		n, err := ptmx.Read(buf)
 		if err != nil {
-			log.Printf("ws tmux read error: session=%s err=%v", sessionName, err)
+			logger.Errorf("ws tmux read error: session=%s err=%v", sessionName, err)
 			break
 		}
 		if err := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
-			log.Printf("ws write error: session=%s err=%v", sessionName, err)
+			logger.Errorf("ws write error: session=%s err=%v", sessionName, err)
 			break
 		}
 	}
 
-	log.Printf("ws disconnect: session=%s", sessionName)
+	logger.Infof("ws disconnect: session=%s", sessionName)
 }
 
 // ─── WebAuthn handlers ───
@@ -589,7 +590,7 @@ func (s *Server) handleWebAuthnRegisterStart(w http.ResponseWriter, r *http.Requ
 		webauthn.WithConveyancePreference(protocol.PreferNoAttestation),
 	)
 	if err != nil {
-		log.Printf("webauthn register start error: %v", err)
+		logger.Errorf("webauthn.*error: %v", err)
 		http.Error(w, "registration failed", http.StatusInternalServerError)
 		return
 	}
@@ -641,18 +642,18 @@ func (s *Server) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Req
 	user := authpkg.NewWebAuthnUser(s.credStore)
 	cred, err := wa.FinishRegistration(user, sessionData, r)
 	if err != nil {
-		log.Printf("webauthn register finish error: %v", err)
+		logger.Errorf("webauthn.*error: %v", err)
 		http.Error(w, "registration failed", http.StatusBadRequest)
 		return
 	}
 
 	if err := s.credStore.SaveCredential(cred); err != nil {
-		log.Printf("webauthn save credential error: %v", err)
+		logger.Errorf("webauthn.*error: %v", err)
 		http.Error(w, "save failed", http.StatusInternalServerError)
 		return
 	}
 
-	log.Printf("webauthn: credential registered")
+	logger.Infof("webauthn: credential registered")
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"status":"ok"}`))
 }
@@ -682,7 +683,7 @@ func (s *Server) handleWebAuthnLoginStart(w http.ResponseWriter, r *http.Request
 	user := authpkg.NewWebAuthnUser(s.credStore)
 	assertion, sessionData, err := wa.BeginLogin(user)
 	if err != nil {
-		log.Printf("webauthn login start error: %v", err)
+		logger.Errorf("webauthn.*error: %v", err)
 		http.Error(w, "login failed", http.StatusInternalServerError)
 		return
 	}
@@ -732,7 +733,7 @@ func (s *Server) handleWebAuthnLoginFinish(w http.ResponseWriter, r *http.Reques
 	user := authpkg.NewWebAuthnUser(s.credStore)
 	cred, err := wa.FinishLogin(user, sessionData, r)
 	if err != nil {
-		log.Printf("webauthn login finish error: %v", err)
+		logger.Errorf("webauthn.*error: %v", err)
 		s.rateLimit.RecordFailure(s.rateLimit.KeyFromRequest(r.RemoteAddr))
 		http.Error(w, "authentication failed", http.StatusUnauthorized)
 		return
@@ -764,7 +765,7 @@ func (s *Server) handleWebAuthnRemove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "remove failed", http.StatusInternalServerError)
 		return
 	}
-	log.Printf("webauthn: all credentials removed")
+	logger.Infof("webauthn: all credentials removed")
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"status":"ok"}`))
 }

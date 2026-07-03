@@ -2,13 +2,14 @@ package server
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/aerostone/webtmux/internal/logger"
 )
 
 // ActivityType represents the type of activity
@@ -64,7 +65,7 @@ func (s *ActivityStore) load() {
 	data, err := os.ReadFile(s.file)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			log.Printf("activity: load error: %v", err)
+			logger.Warnf("activity: load error: %v", err)
 		}
 		return
 	}
@@ -81,12 +82,12 @@ func (s *ActivityStore) save() {
 	s.mu.RUnlock()
 
 	if err != nil {
-		log.Printf("activity: marshal error: %v", err)
+		logger.Warnf("activity: marshal error: %v", err)
 		return
 	}
 
 	if err := os.WriteFile(s.file, data, 0644); err != nil {
-		log.Printf("activity: save error: %v", err)
+		logger.Warnf("activity: save error: %v", err)
 	}
 }
 
