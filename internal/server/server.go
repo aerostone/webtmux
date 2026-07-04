@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"fmt"
 	"io/fs"
 	"net"
@@ -254,6 +255,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/files", s.handleFileManager)
 	s.mux.HandleFunc("/api/system", s.handleSystemInfo)
 	s.mux.HandleFunc("/api/activities", s.handleActivities)
+	s.mux.HandleFunc("/api/debug", s.handleDebug)
 	s.mux.HandleFunc("/ws", s.handleWebSocket)
 
 	webContent, _ := fs.Sub(webFS, "web")
@@ -310,6 +312,17 @@ func (s *Server) getWebAuthn(r *http.Request) *webauthn.WebAuthn {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("ok"))
+}
+
+func (s *Server) handleDebug(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	body, _ := io.ReadAll(r.Body)
+	logger.Infof("[DEBUG] %s", string(body))
+	w.Header().Set("Content-Type", "application/json")
+	w.Write([]byte(`{"ok":true}`))
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {

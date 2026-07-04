@@ -769,6 +769,46 @@ function showToast(msg){
   setTimeout(()=>toast.remove(),2000);
 }
 
+function debugLayout(){
+  const container=document.getElementById('terminal-container');
+  const xterm=container?.querySelector('.xterm');
+  const vp=container?.querySelector('.xterm-viewport');
+  const screen=container?.querySelector('.xterm-screen');
+  const rows=container?.querySelector('.xterm-rows');
+  const r0=rows?.children[0];
+  const data={
+    time:new Date().toISOString(),
+    window:{w:window.innerWidth,h:window.innerHeight,dpr:window.devicePixelRatio},
+    container:{ow:container?.offsetWidth,cw:container?.clientWidth,oh:container?.offsetHeight,ch:container?.clientHeight,style:container?.style.cssText},
+    xterm:{ow:xterm?.offsetWidth,cw:xterm?.clientWidth,style:getComputedStyle(xterm||document.body).cssText?.substring(0,200)},
+    viewport:{ow:vp?.offsetWidth,cw:vp?.clientWidth,scrollW:vp?.scrollWidth,clientH:vp?.clientHeight,scrollH:vp?.scrollHeight,overflow:getComputedStyle(vp||document.body).overflow,offsetParentW:vp?.offsetParent?.offsetWidth},
+    screen:{ow:screen?.offsetWidth,cw:screen?.clientWidth,inlineW:screen?.style?.width},
+    rows:{ow:rows?.offsetWidth,cw:rows?.clientWidth,childCount:rows?.children?.length},
+    row0:{ow:r0?.offsetWidth,cw:r0?.clientWidth,inlineW:r0?.style?.width,childCount:r0?.children?.length},
+    term:{cols:term?.cols,rows:term?.rows},
+    dims:term?._core?._renderService?.dimensions?.css,
+    viewportScrollBarW:term?._core?.viewport?.scrollBarWidth
+  };
+  // Measure all ancestors
+  const ancestors=[];
+  let el=container;
+  while(el&&el!==document.body){
+    const cs=getComputedStyle(el);
+    ancestors.push({tag:el.tagName,id:el.id,cls:el.className?.substring(0,60),ow:el.offsetWidth,cw:el.clientWidth,overflow:cs.overflow,overflowY:cs.overflowY,scrollbarW:cs.scrollbarWidth});
+    el=el.parentElement;
+  }
+  data.ancestors=ancestors;
+  // All xterm-rows children widths
+  if(rows){
+    const rowWidths=[];
+    for(let i=0;i<Math.min(rows.children.length,3);i++)rowWidths.push(rows.children[i].offsetWidth);
+    data.sampleRowWidths=rowWidths;
+  }
+  fetch('/api/debug',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  console.log('[debugLayout]',data);
+  return data;
+}
+
 // Reset copy mode state on WebSocket reconnect
 function resetCopyMode(){copyModeActive=false;document.querySelectorAll('.key.buf-active').forEach(el=>el.classList.remove('buf-active'));}
 
@@ -833,22 +873,14 @@ function initTerminal(){
   fitAddon=new FA();term.loadAddon(fitAddon);
   term.open($('terminal-container'));
   
-  // Kill scrollbar width AFTER xterm measures it (must be after term.open)
+  // Kill scrollbar width: defineProperty getter so xterm can never set it back
   try{
-    const vp=term._core._disposables.find(d=>d&&d.scrollBarWidth!==undefined);
-    if(vp)vp.scrollBarWidth=0;
+    const vp=term._core.viewport;
+    if(vp)Object.defineProperty(vp,'scrollBarWidth',{get:()=>0,set:()=>{},configurable:true});
   }catch(e){}
   
   // Delay fit until container has final width
   setTimeout(()=>{
-    // Re-patch scrollbar width (in case ResizeObserver triggers a re-layout)
-    try{
-      const vp=term._core._disposables.find(d=>d&&d.scrollBarWidth!==undefined);
-      if(vp)vp.scrollBarWidth=0;
-      const dims=term._core._renderService.dimensions;
-      const vpEl=term.element?.querySelector('.xterm-viewport');
-      if(vpEl&&dims)dims.css.canvas.width=vpEl.clientWidth;
-    }catch(e){}
     fitAddon.fit();
   },200);
   
@@ -856,8 +888,20 @@ function initTerminal(){
   const screenEl=term.element?.querySelector('.xterm-screen');
   const vpEl=term.element?.querySelector('.xterm-viewport');
   if(screenEl&&vpEl){
-    const syncScreen=()=>{const w=vpEl.clientWidth;if(w&&screenEl.style.width!==w+'px')screenEl.style.width=w+'px';};
-    new MutationObserver(syncScreen).observe(screenEl,{attributes:true,attributeFilter:['style']});
+    const syncXterm=()=>{
+      const w=vpEl.clientWidth;
+      if(!w)return;
+      if(screenEl.style.width!==w+'px')screenEl.style.width=w+'px';
+      // Also sync rows and row children
+      const rows=screenEl.querySelector('.xterm-rows');
+      if(rows){
+        if(rows.style.width!==w+'px')rows.style.width=w+'px';
+        for(let i=0;i<rows.children.length;i++){
+          if(rows.children[i].style.width!==w+'px')rows.children[i].style.width=w+'px';
+        }
+      }
+    };
+    new MutationObserver(syncXterm).observe(screenEl,{attributes:true,attributeFilter:['style']});
   }
   
   // Enable native selection on mobile
@@ -1434,18 +1478,12 @@ function connect(name){
   ws.onopen=()=>{
     status.textContent=`Connected: ${name}`;
     setTimeout(()=>{
-      // Patch scrollbar width before fit
-      try{
-        const vp=term._core._disposables.find(d=>d&&d.scrollBarWidth!==undefined);
-        if(vp)vp.scrollBarWidth=0;
-        const dims=term._core._renderService.dimensions;
-        const vpEl=term.element?.querySelector('.xterm-viewport');
-        if(vpEl&&dims)dims.css.canvas.width=vpEl.clientWidth;
-      }catch(e){}
       const oldCols=term.cols,oldRows=term.rows;
       fitAddon.fit();
       sendResize();
       if(term.cols!==oldCols||term.rows!==oldRows)sendResize();
+      // Delay debug to let MutationObserver fire
+      setTimeout(()=>debugLayout(),100);
     },200);
     ptySizeSent=true;
     resetWsTimeout();
