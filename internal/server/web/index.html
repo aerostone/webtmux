@@ -54,6 +54,10 @@
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:100vh;height:100dvh;display:flex;flex-direction:column;overflow:hidden;-webkit-user-select:none;user-select:none}
 
+/* Debug overlay */
+#debug-panel{position:fixed;bottom:0;left:0;right:0;background:rgba(0,0,0,.85);color:#3fb950;font-family:monospace;font-size:11px;padding:6px 10px;z-index:99999;max-height:40vh;overflow-y:auto;white-space:pre;display:none}
+#debug-panel.show{display:block}
+
 /* Login */
 #login-view{display:flex;align-items:center;justify-content:center;height:100vh}
 #login-box{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:32px;width:320px;max-width:90vw}
@@ -98,8 +102,8 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
 #terminal-wrap{flex:1;min-height:0;overflow:hidden;position:relative}
 #terminal-container{width:100%;height:100%;overflow:hidden;touch-action:auto}
 #terminal-container .xterm-viewport{overflow-y:hidden!important;overflow-x:hidden!important;scrollbar-width:none;-ms-overflow-style:none}
-#terminal-container .xterm-viewport::-webkit-scrollbar{display:none}
-#terminal-container .xterm-screen{overflow:hidden;width:100%!important}
+#terminal-container .xterm-viewport::-webkit-scrollbar{display:none;width:0;height:0}
+#terminal-container .xterm-screen{overflow:hidden}
 
 /* Toolbar */
 #toolbar{background:#161b22;border-top:1px solid #30363d;flex-shrink:0;overflow-x:auto;scrollbar-width:none}
@@ -236,6 +240,7 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
 </head>
 <body>
 
+<div id="debug-panel"></div>
 <div id="login-view">
   <div id="login-box">
     <h1>🔒 webtmux</h1>
@@ -827,7 +832,33 @@ function initTerminal(){
   const FA=FitAddon.FitAddon||FitAddon;
   fitAddon=new FA();term.loadAddon(fitAddon);
   term.open($('terminal-container'));
-  requestAnimationFrame(()=>fitAddon.fit());
+  
+  // Kill scrollbar width AFTER xterm measures it (must be after term.open)
+  try{
+    const vp=term._core._disposables.find(d=>d&&d.scrollBarWidth!==undefined);
+    if(vp)vp.scrollBarWidth=0;
+  }catch(e){}
+  
+  // Delay fit until container has final width
+  setTimeout(()=>{
+    // Re-patch scrollbar width (in case ResizeObserver triggers a re-layout)
+    try{
+      const vp=term._core._disposables.find(d=>d&&d.scrollBarWidth!==undefined);
+      if(vp)vp.scrollBarWidth=0;
+      const dims=term._core._renderService.dimensions;
+      const vpEl=term.element?.querySelector('.xterm-viewport');
+      if(vpEl&&dims)dims.css.canvas.width=vpEl.clientWidth;
+    }catch(e){}
+    fitAddon.fit();
+  },200);
+  
+  // Keep screen width synced with viewport (override xterm's inline style)
+  const screenEl=term.element?.querySelector('.xterm-screen');
+  const vpEl=term.element?.querySelector('.xterm-viewport');
+  if(screenEl&&vpEl){
+    const syncScreen=()=>{const w=vpEl.clientWidth;if(w&&screenEl.style.width!==w+'px')screenEl.style.width=w+'px';};
+    new MutationObserver(syncScreen).observe(screenEl,{attributes:true,attributeFilter:['style']});
+  }
   
   // Enable native selection on mobile
   const ua=navigator.userAgent;
@@ -1402,12 +1433,20 @@ function connect(name){
   ws.binaryType='arraybuffer';
   ws.onopen=()=>{
     status.textContent=`Connected: ${name}`;
-    requestAnimationFrame(()=>{
+    setTimeout(()=>{
+      // Patch scrollbar width before fit
+      try{
+        const vp=term._core._disposables.find(d=>d&&d.scrollBarWidth!==undefined);
+        if(vp)vp.scrollBarWidth=0;
+        const dims=term._core._renderService.dimensions;
+        const vpEl=term.element?.querySelector('.xterm-viewport');
+        if(vpEl&&dims)dims.css.canvas.width=vpEl.clientWidth;
+      }catch(e){}
       const oldCols=term.cols,oldRows=term.rows;
       fitAddon.fit();
       sendResize();
       if(term.cols!==oldCols||term.rows!==oldRows)sendResize();
-    });
+    },200);
     ptySizeSent=true;
     resetWsTimeout();
   };
@@ -1609,6 +1648,85 @@ await checkWebAuthn();
 checkSession();
 })();
 setInterval(loadSessionsList,10000);
+
+// ─── Debug Panel ───
+let debugTimer=null;
+const debugPanel=$('debug-panel');
+let debugVisible=false;
+
+function toggleDebug(){
+  debugVisible=!debugVisible;
+  debugPanel.classList.toggle('show',debugVisible);
+  if(debugVisible)runDebug();
+}
+
+function runDebug(){
+  if(!debugVisible||!term)return;
+  const container=$('terminal-container');
+  const wrap=$('terminal-wrap');
+  const vp=container?.querySelector('.xterm-viewport');
+  const sc=container?.querySelector('.xterm-screen');
+  const rows=container?.querySelector('.xterm-rows');
+  const xterm=container?.querySelector('.xterm');
+
+  const info=(el,name)=>{
+    if(!el)return name+': null';
+    const cs=getComputedStyle(el);
+    const r=el.getBoundingClientRect();
+    return `${name}: offsetW=${el.offsetWidth} clientW=${el.clientWidth} scrollW=${el.scrollWidth} | computed=${cs.width} inline=${el.style.width||'-'} | overflow=${cs.overflow}/${cs.overflowY} | rect(L=${r.left.toFixed(0)} R=${r.right.toFixed(0)} W=${r.width.toFixed(0)})`;
+  };
+
+  // Check row content width
+  let rowInfo='';
+  if(rows&&rows.children.length>0){
+    const r0=rows.children[0];
+    rowInfo=`\nrow[0]: offsetW=${r0.offsetWidth} clientW=${r0.clientWidth} children=${r0.children.length}`;
+  }
+
+  // Check all ancestors for overflow
+  let ancestorInfo='';
+  let el=container;
+  while(el&&el!==document.body){
+    const cs=getComputedStyle(el);
+    if(cs.overflow!=='visible'||cs.overflowY!=='visible'){
+      ancestorInfo+=`\n${el.tagName}#${el.id||'-'}.${el.className.toString().substring(0,20)}: overflow=${cs.overflow}/${cs.overflowY} W=${el.offsetWidth}`;
+    }
+    el=el.parentElement;
+  }
+
+  // gap analysis
+  const vpR=vp?.getBoundingClientRect();
+  const scR=sc?.getBoundingClientRect();
+  const gapR=vpR&&scR?(vpR.right-scR.right):0;
+  const gapL=vpR&&scR?(scR.left-vpR.left):0;
+
+  debugPanel.textContent=
+    `Terminal: cols=${term.cols} rows=${term.rows} fontSize=${term.options.fontSize}\n`
+    +info(wrap,'#terminal-wrap')+'\n'
+    +info(container,'#terminal-container')+'\n'
+    +info(xterm,'.xterm')+'\n'
+    +info(vp,'.xterm-viewport')+'\n'
+    +info(sc,'.xterm-screen')+'\n'
+    +info(rows,'.xterm-rows')+'\n'
+    +`screen: computedW=${getComputedStyle(sc).width} inlineW=${sc.style.width||'-'} !important=${getComputedStyle(sc).width!==sc.style.width?'YES':'no'}\n`
+    +`gaps: left=${gapL.toFixed(1)}px right=${gapR.toFixed(1)}px`
+    +rowInfo
+    +ancestorInfo;
+
+  debugTimer=setTimeout(runDebug,1000);
+}
+
+// Add debug button to header
+(function(){
+  const h=$('header');
+  if(!h)return;
+  const btn=document.createElement('button');
+  btn.className='btn';
+  btn.style.cssText='background:#f0883e;color:#000;font-size:11px;padding:3px 8px';
+  btn.textContent='Debug';
+  btn.addEventListener('click',toggleDebug);
+  h.appendChild(btn);
+})();
 </script>
 </body>
 </html>
