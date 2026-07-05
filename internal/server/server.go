@@ -468,6 +468,19 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	// Set up ping/pong keepalive
+	const (
+		writeWait      = 10 * time.Second
+		pongWait       = 60 * time.Second
+		pingInterval   = 30 * time.Second
+	)
+
+	conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
 	// Close old connection for same session (exclusive)
 	s.wsConnMu.Lock()
 	if old, ok := s.wsConns[sessionName]; ok {
@@ -520,6 +533,19 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			WithSession(sessionName), WithRemote(r.RemoteAddr))
 	}
 
+	// Start ping ticker for keepalive
+	pingTicker := time.NewTicker(pingInterval)
+	defer pingTicker.Stop()
+	go func() {
+		for range pingTicker.C {
+			conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				logger.Debugf("ws ping send failed: session=%s err=%v", sessionName, err)
+				return
+			}
+		}
+	}()
+
 	// Handle resize messages from client
 	go func() {
 		defer close(state.cmdDone) // Signal when tmux process exits
@@ -558,6 +584,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			logger.Errorf("ws tmux read error: session=%s err=%v", sessionName, err)
 			break
 		}
+		conn.SetWriteDeadline(time.Now().Add(writeWait))
 		if err := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
 			logger.Errorf("ws write error: session=%s err=%v", sessionName, err)
 			break
