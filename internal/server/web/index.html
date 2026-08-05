@@ -530,7 +530,9 @@ const MODIFIERS=[
   {id:'Alt',label:'Alt',persistent:true},
   {id:'Esc',label:'Esc',persistent:false},
   {id:'Tab',label:'Tab',persistent:false},
-  {id:'Select',label:'Select',persistent:false,action:'selectMode'},
+  {id:'Up',label:'↑',persistent:false},
+  {id:'Down',label:'↓',persistent:false},
+  {id:'Enter',label:'⏎',persistent:false},
 ];
 const modRowInner=$('mod-row-inner');
 
@@ -583,12 +585,12 @@ function sendSeq(...bytes){
 let copyModeActive=false;
 let selectModeActive=false;
 const TOOLBAR_GROUPS=[
-  {name:'tmux prefix',keys:[{label:'⌃B',send:'\x02',title:'tmux prefix'}]},
+  {name:'select',keys:[{label:'SEL',action:'selectMode',title:'select text'}]},
   {name:'tmux window',keys:[{label:'◀Win',combo:'\x02p',title:'prev window'},{label:'Win▶',combo:'\x02n',title:'next window'}]},
-  {name:'tmux scroll',keys:[{label:'▲Buf',action:'toggleBuf',title:'toggle copy mode ↑'},{label:'▼Buf',action:'toggleBufDown',title:'toggle copy mode ↓'},{label:'PgUp',send:SEQ.PgUp},{label:'PgDn',send:SEQ.PgDn},{label:'NewWin',combo:'\x02c',title:'new window'}]},
+  {name:'tmux scroll',keys:[{label:'▲Buf',action:'toggleBuf',title:'toggle copy mode ↑'},{label:'PgUp',send:SEQ.PgUp},{label:'PgDn',send:SEQ.PgDn}]},
   {name:'tmux pane',keys:[{label:'|Pane',combo:'\x02%',title:'split vertical'},{label:'—Pane',combo:'\x02"',title:'split horizontal'},{label:'◀Pane',combo:'\x02{LEFT}',title:'focus left pane'},{label:'Pane▶',combo:'\x02{RIGHT}',title:'focus right pane'},{label:'Kill○',combo:'\x02x',title:'kill pane'},{label:'Zoom',combo:'\x02z',title:'zoom pane'}]},
-  {name:'tmux copy',keys:[{label:'Copy',combo:'\x02[',title:'copy mode'},{label:'Paste',combo:'\x02]',title:'paste buffer'}]},
-  {name:'tmux session',keys:[{label:'Kill',combo:'\x02&',title:'kill window'},{label:'List',combo:'\x02w',title:'list windows'},{label:'Detach',combo:'\x02d',title:'detach'},{label:'Switch',combo:'\x02s',title:'list sessions'}]},
+  {name:'tmux copy',keys:[{label:'Copy',combo:'\x02[',title:'copy mode'},{label:'Paste',combo:'\x02]',title:'paste buffer'},{label:'▼Buf',action:'toggleBufDown',title:'toggle copy mode ↓'}]},
+  {name:'tmux session',keys:[{label:'NewWin',combo:'\x02c',title:'new window'},{label:'Kill',combo:'\x02&',title:'kill window'},{label:'List',combo:'\x02w',title:'list windows'},{label:'Detach',combo:'\x02d',title:'detach'},{label:'Switch',combo:'\x02s',title:'list sessions'}]},
   {name:'Ctrl keys',keys:[{label:'⌃C',send:'\x03',title:'interrupt'},{label:'⌃D',send:'\x04',title:'EOF'},{label:'⌃Z',send:'\x1a',title:'suspend'},{label:'⌃L',send:'\x0c',title:'clear'},{label:'⌃R',send:'\x12',title:'reverse search'},{label:'⌃A',send:'\x01',title:'begin line'},{label:'⌃E',send:'\x05',title:'end line'},{label:'⌃K',send:'\x0b',title:'kill line'},{label:'⌃U',send:'\x15',title:'kill all'},{label:'⌃W',send:'\x17',title:'kill word'}]},
   {name:'Nav',keys:[{label:'↑',send:SEQ.Up},{label:'↓',send:SEQ.Down},{label:'←',send:SEQ.Left},{label:'→',send:SEQ.Right},{label:'Home',send:SEQ.Home},{label:'End',send:SEQ.End}]},
   {name:'Special',keys:[{label:'Esc',send:SEQ.Esc},{label:'Tab',send:'\t'},{label:'Bksp',send:'\x7f'},{label:'Enter',send:'\r'},{label:'Space',send:' '},{label:'~',send:'~'},{label:'/',send:'/'},{label:'|',send:'|'}]},
@@ -636,6 +638,7 @@ function blurTerminal(){
 }
 
 function doScrollAction(action){
+  if(action==='selectMode'){toggleSelectMode();return;}
   if(!ws||ws.readyState!==WebSocket.OPEN)return;
   const isToggle=action==='toggleBuf'||action==='toggleBufDown';
   if(isToggle){
