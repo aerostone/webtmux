@@ -50,6 +50,7 @@
 <link rel="stylesheet" href="https://s4.zstatic.net/npm/@xterm/xterm@5.5.0/css/xterm.css?v=202607011400">
 <script src="https://s4.zstatic.net/npm/@xterm/xterm@5.5.0/lib/xterm.js?v=202607011400"></script>
 <script src="https://s4.zstatic.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js?v=202607011400"></script>
+<script src="https://s4.zstatic.net/npm/@xterm/addon-canvas@0.7.0/lib/addon-canvas.js?v=202607011400"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:100vh;height:100dvh;display:flex;flex-direction:column;overflow:hidden;-webkit-user-select:none;user-select:none}
@@ -873,8 +874,24 @@ function initTerminal(){
     macOptionClickForcesSelection:true
   });
   const FA=FitAddon.FitAddon||FitAddon;
-  fitAddon=new FA();term.loadAddon(fitAddon);
+  fitAddon=new FA();
+  term.loadAddon(fitAddon);
   term.open($('terminal-container'));
+  fitAddon.fit();
+
+  // Canvas Renderer：用 Canvas 2D 批量绘制，比默认 DOM 渲染快、无 WebGL 的字体图集缓存问题。
+  // tmux attach 模式切 win 会整屏重发，Canvas 能在一帧内绘完整屏，消除“从上到下逐行刷新”观感。
+  // 加载失败/不支持时自动降级到 xterm 默认 DOM 渲染器。
+  try{
+    if(typeof CanvasAddon!=='undefined'){
+      const CA=CanvasAddon.CanvasAddon||CanvasAddon;
+      const cv=new CA();
+      term.loadAddon(cv);
+      term._canvasAddon=cv;
+    }
+  }catch(e){
+    console.warn('[webtmux] Canvas renderer 不可用，回退到 DOM 渲染器:', e&&e.message||e);
+  }
   
   // Kill scrollbar width: defineProperty getter so xterm can never set it back
   try{
