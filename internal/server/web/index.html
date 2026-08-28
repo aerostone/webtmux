@@ -55,10 +55,6 @@
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:100vh;height:100dvh;display:flex;flex-direction:column;overflow:hidden;-webkit-user-select:none;user-select:none}
 
-/* Debug overlay */
-#debug-panel{position:fixed;bottom:0;left:0;right:0;background:rgba(0,0,0,.85);color:#3fb950;font-family:monospace;font-size:11px;padding:6px 10px;z-index:99999;max-height:40vh;overflow-y:auto;white-space:pre;display:none}
-#debug-panel.show{display:block}
-
 /* Login */
 #login-view{display:flex;align-items:center;justify-content:center;height:100vh}
 #login-box{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:32px;width:320px;max-width:90vw}
@@ -241,7 +237,6 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
 </head>
 <body>
 
-<div id="debug-panel"></div>
 <div id="login-view">
   <div id="login-box">
     <h1>🔒 webtmux</h1>
@@ -773,46 +768,6 @@ function showToast(msg){
   setTimeout(()=>toast.remove(),2000);
 }
 
-function debugLayout(){
-  const container=document.getElementById('terminal-container');
-  const xterm=container?.querySelector('.xterm');
-  const vp=container?.querySelector('.xterm-viewport');
-  const screen=container?.querySelector('.xterm-screen');
-  const rows=container?.querySelector('.xterm-rows');
-  const r0=rows?.children[0];
-  const data={
-    time:new Date().toISOString(),
-    window:{w:window.innerWidth,h:window.innerHeight,dpr:window.devicePixelRatio},
-    container:{ow:container?.offsetWidth,cw:container?.clientWidth,oh:container?.offsetHeight,ch:container?.clientHeight,style:container?.style.cssText},
-    xterm:{ow:xterm?.offsetWidth,cw:xterm?.clientWidth,style:getComputedStyle(xterm||document.body).cssText?.substring(0,200)},
-    viewport:{ow:vp?.offsetWidth,cw:vp?.clientWidth,scrollW:vp?.scrollWidth,clientH:vp?.clientHeight,scrollH:vp?.scrollHeight,overflow:getComputedStyle(vp||document.body).overflow,offsetParentW:vp?.offsetParent?.offsetWidth},
-    screen:{ow:screen?.offsetWidth,cw:screen?.clientWidth,inlineW:screen?.style?.width},
-    rows:{ow:rows?.offsetWidth,cw:rows?.clientWidth,childCount:rows?.children?.length},
-    row0:{ow:r0?.offsetWidth,cw:r0?.clientWidth,inlineW:r0?.style?.width,childCount:r0?.children?.length},
-    term:{cols:term?.cols,rows:term?.rows},
-    dims:term?._core?._renderService?.dimensions?.css,
-    viewportScrollBarW:term?._core?.viewport?.scrollBarWidth
-  };
-  // Measure all ancestors
-  const ancestors=[];
-  let el=container;
-  while(el&&el!==document.body){
-    const cs=getComputedStyle(el);
-    ancestors.push({tag:el.tagName,id:el.id,cls:el.className?.substring(0,60),ow:el.offsetWidth,cw:el.clientWidth,overflow:cs.overflow,overflowY:cs.overflowY,scrollbarW:cs.scrollbarWidth});
-    el=el.parentElement;
-  }
-  data.ancestors=ancestors;
-  // All xterm-rows children widths
-  if(rows){
-    const rowWidths=[];
-    for(let i=0;i<Math.min(rows.children.length,3);i++)rowWidths.push(rows.children[i].offsetWidth);
-    data.sampleRowWidths=rowWidths;
-  }
-  fetch('/api/debug',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
-  console.log('[debugLayout]',data);
-  return data;
-}
-
 // Reset copy mode state on WebSocket reconnect
 function resetCopyMode(){copyModeActive=false;document.querySelectorAll('.key.buf-active').forEach(el=>el.classList.remove('buf-active'));}
 
@@ -887,7 +842,6 @@ function initTerminal(){
       const CA=CanvasAddon.CanvasAddon||CanvasAddon;
       const cv=new CA();
       term.loadAddon(cv);
-      term._canvasAddon=cv;
     }
   }catch(e){
     console.warn('[webtmux] Canvas renderer 不可用，回退到 DOM 渲染器:', e&&e.message||e);
@@ -904,25 +858,8 @@ function initTerminal(){
     fitAddon.fit();
   },200);
   
-  // Keep screen width synced with viewport (override xterm's inline style)
-  const screenEl=term.element?.querySelector('.xterm-screen');
-  const vpEl=term.element?.querySelector('.xterm-viewport');
-  if(screenEl&&vpEl){
-    const syncXterm=()=>{
-      const w=vpEl.clientWidth;
-      if(!w)return;
-      if(screenEl.style.width!==w+'px')screenEl.style.width=w+'px';
-      // Also sync rows and row children
-      const rows=screenEl.querySelector('.xterm-rows');
-      if(rows){
-        if(rows.style.width!==w+'px')rows.style.width=w+'px';
-        for(let i=0;i<rows.children.length;i++){
-          if(rows.children[i].style.width!==w+'px')rows.children[i].style.width=w+'px';
-        }
-      }
-    };
-    new MutationObserver(syncXterm).observe(screenEl,{attributes:true,attributeFilter:['style']});
-  }
+  // (已移除) syncXterm 强制宽度同步：Canvas 渲染器下会触发二次重排/重绘，
+  // 是“切窗后再刷一次”的可疑来源，改为让 xterm 自行管理布局。
   
   // Enable native selection on mobile
   const ua=navigator.userAgent;
@@ -1492,6 +1429,9 @@ function connect(name){
   if(ws){ws.onclose=null;ws.close()}
   currentSession=name;
   ptySizeSent=false;
+  // [fix] 重连时清理合帧缓冲区，避免旧连接残留数据 + 未 flush 的 rAF 导致新连接不渲染
+  connect._rxBuf=[]; connect._rxScheduled=false; connect._rxBytes=0;
+  connect._rxGen=(connect._rxGen||0)+1;  // 代次标记：使旧的 rAF 回调失效
   const proto=location.protocol==='https:'?'wss:':'ws:';
   ws=new WebSocket(`${proto}//${location.host}/ws?session=${name}`);
   ws.binaryType='arraybuffer';
@@ -1502,14 +1442,35 @@ function connect(name){
       fitAddon.fit();
       sendResize();
       if(term.cols!==oldCols||term.rows!==oldRows)sendResize();
-      // Delay debug to let MutationObserver fire
-      setTimeout(()=>debugLayout(),100);
     },200);
     ptySizeSent=true;
     resetWsTimeout();
   };
   ws.onmessage=e=>{
-    term.write(e.data instanceof ArrayBuffer?new Uint8Array(e.data):e.data);
+    const buf=e.data instanceof ArrayBuffer?new Uint8Array(e.data):(typeof e.data==='string'?new TextEncoder().encode(e.data):e.data);
+    // [fix] 合帧：同一帧(rAF)内到达的多个 chunk 先累积，统一在下一帧开头一次性 write。
+    // 重连时 connect._rxGen 递增，使旧连接的 rAF 回调失效。
+    if(!connect._rxBuf){connect._rxBuf=[];connect._rxScheduled=false;connect._rxBytes=0;}
+    connect._rxBuf.push(buf);
+    connect._rxBytes+=(buf?.length||e.data?.length||0);
+    if(!connect._rxScheduled){
+      connect._rxScheduled=true;
+      const gen=connect._rxGen||0;
+      requestAnimationFrame(()=>{
+        if(connect._rxGen!==gen)return;
+        connect._rxScheduled=false;
+        const chunks=connect._rxBuf;
+        connect._rxBuf=[];
+        connect._rxBytes=0;
+        if(!chunks.length)return;
+        // 拼接同一帧内所有 chunk 成单次写入
+        let total=0; for(const c of chunks) total+=(c?.length||0);
+        const merged=new Uint8Array(total);
+        let off=0;
+        for(const c of chunks){ if(c&&c.length){ merged.set(c,off); off+=c.length; } }
+        term.write(merged);
+      });
+    }
     resetWsTimeout();
   };
   ws.onclose=e=>{
@@ -1706,85 +1667,6 @@ await checkWebAuthn();
 checkSession();
 })();
 setInterval(loadSessionsList,10000);
-
-// ─── Debug Panel ───
-let debugTimer=null;
-const debugPanel=$('debug-panel');
-let debugVisible=false;
-
-function toggleDebug(){
-  debugVisible=!debugVisible;
-  debugPanel.classList.toggle('show',debugVisible);
-  if(debugVisible)runDebug();
-}
-
-function runDebug(){
-  if(!debugVisible||!term)return;
-  const container=$('terminal-container');
-  const wrap=$('terminal-wrap');
-  const vp=container?.querySelector('.xterm-viewport');
-  const sc=container?.querySelector('.xterm-screen');
-  const rows=container?.querySelector('.xterm-rows');
-  const xterm=container?.querySelector('.xterm');
-
-  const info=(el,name)=>{
-    if(!el)return name+': null';
-    const cs=getComputedStyle(el);
-    const r=el.getBoundingClientRect();
-    return `${name}: offsetW=${el.offsetWidth} clientW=${el.clientWidth} scrollW=${el.scrollWidth} | computed=${cs.width} inline=${el.style.width||'-'} | overflow=${cs.overflow}/${cs.overflowY} | rect(L=${r.left.toFixed(0)} R=${r.right.toFixed(0)} W=${r.width.toFixed(0)})`;
-  };
-
-  // Check row content width
-  let rowInfo='';
-  if(rows&&rows.children.length>0){
-    const r0=rows.children[0];
-    rowInfo=`\nrow[0]: offsetW=${r0.offsetWidth} clientW=${r0.clientWidth} children=${r0.children.length}`;
-  }
-
-  // Check all ancestors for overflow
-  let ancestorInfo='';
-  let el=container;
-  while(el&&el!==document.body){
-    const cs=getComputedStyle(el);
-    if(cs.overflow!=='visible'||cs.overflowY!=='visible'){
-      ancestorInfo+=`\n${el.tagName}#${el.id||'-'}.${el.className.toString().substring(0,20)}: overflow=${cs.overflow}/${cs.overflowY} W=${el.offsetWidth}`;
-    }
-    el=el.parentElement;
-  }
-
-  // gap analysis
-  const vpR=vp?.getBoundingClientRect();
-  const scR=sc?.getBoundingClientRect();
-  const gapR=vpR&&scR?(vpR.right-scR.right):0;
-  const gapL=vpR&&scR?(scR.left-vpR.left):0;
-
-  debugPanel.textContent=
-    `Terminal: cols=${term.cols} rows=${term.rows} fontSize=${term.options.fontSize}\n`
-    +info(wrap,'#terminal-wrap')+'\n'
-    +info(container,'#terminal-container')+'\n'
-    +info(xterm,'.xterm')+'\n'
-    +info(vp,'.xterm-viewport')+'\n'
-    +info(sc,'.xterm-screen')+'\n'
-    +info(rows,'.xterm-rows')+'\n'
-    +`screen: computedW=${getComputedStyle(sc).width} inlineW=${sc.style.width||'-'} !important=${getComputedStyle(sc).width!==sc.style.width?'YES':'no'}\n`
-    +`gaps: left=${gapL.toFixed(1)}px right=${gapR.toFixed(1)}px`
-    +rowInfo
-    +ancestorInfo;
-
-  debugTimer=setTimeout(runDebug,1000);
-}
-
-// Add debug button to header
-(function(){
-  const h=$('header');
-  if(!h)return;
-  const btn=document.createElement('button');
-  btn.className='btn';
-  btn.style.cssText='background:#f0883e;color:#000;font-size:11px;padding:3px 8px';
-  btn.textContent='Debug';
-  btn.addEventListener('click',toggleDebug);
-  h.appendChild(btn);
-})();
 </script>
 </body>
 </html>

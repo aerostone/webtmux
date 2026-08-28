@@ -6,7 +6,6 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
-	"io"
 	"fmt"
 	"io/fs"
 	"net"
@@ -50,9 +49,19 @@ type Server struct {
 // wsConnState tracks WebSocket connection and its tmux process
 // to ensure clean shutdown before accepting new connections
 type wsConnState struct {
-	conn    *websocket.Conn
-	ptmx    tmux.Resizable
-	cmdDone chan struct{} // closed when tmux process exits
+	conn     *websocket.Conn
+	ptmx     tmux.Resizable
+	cmdDone  chan struct{} // closed when tmux process exits
+	writeMu  sync.Mutex    // serializes all writes to conn (gorilla/websocket is not concurrency-safe)
+}
+
+// writeMessage is the single serialized write path for a WebSocket connection.
+// gorilla/websocket forbids concurrent writes; all goroutines (main loop, ping
+// ticker, closeAllConns) must go through here to avoid "concurrent write" panics.
+func (st *wsConnState) writeMessage(messageType int, data []byte) error {
+	st.writeMu.Lock()
+	defer st.writeMu.Unlock()
+	return st.conn.WriteMessage(messageType, data)
 }
 
 // closeAllConns closes all active WebSocket connections
@@ -68,7 +77,7 @@ func (s *Server) closeAllConns() {
 
 	logger.Infof("ws closing all connections: count=%d", count)
 	for name, state := range s.wsConns {
-		state.conn.WriteMessage(websocket.CloseMessage,
+		state.writeMessage(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "session ended"))
 		state.conn.Close()
 		logger.Infof("ws closed connection: session=%s", name)
@@ -255,7 +264,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/files", s.handleFileManager)
 	s.mux.HandleFunc("/api/system", s.handleSystemInfo)
 	s.mux.HandleFunc("/api/activities", s.handleActivities)
-	s.mux.HandleFunc("/api/debug", s.handleDebug)
 	s.mux.HandleFunc("/ws", s.handleWebSocket)
 
 	webContent, _ := fs.Sub(webFS, "web")
@@ -312,17 +320,6 @@ func (s *Server) getWebAuthn(r *http.Request) *webauthn.WebAuthn {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("ok"))
-}
-
-func (s *Server) handleDebug(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "POST only", http.StatusMethodNotAllowed)
-		return
-	}
-	body, _ := io.ReadAll(r.Body)
-	logger.Infof("[DEBUG] %s", string(body))
-	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"ok":true}`))
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -407,10 +404,11 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 	sessions, err := s.tmux.ListSessions()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if sessions == nil {
+		// tmux server not reachable (e.g. socket deleted, no server running):
+		// return an empty list instead of 500 so the client can still load
+		// the sessions view and create new sessions, rather than being stuck
+		// on "fail to load session".
+		logger.Warnf("list sessions failed (tmux unreachable): %v", err)
 		sessions = []tmux.Session{}
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -474,7 +472,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		logger.Infof("ws closing old connection: session=%s", sessionName)
 		
 		// Send close message to old WebSocket
-		old.conn.WriteMessage(websocket.CloseMessage,
+		old.writeMessage(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "replaced by new connection"))
 		old.conn.Close()
 		
@@ -525,7 +523,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer pingTicker.Stop()
 	go func() {
 		for range pingTicker.C {
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			if err := state.writeMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
 		}
@@ -569,7 +567,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			logger.Errorf("ws tmux read error: session=%s err=%v", sessionName, err)
 			break
 		}
-		if err := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
+		if err := state.writeMessage(websocket.BinaryMessage, buf[:n]); err != nil {
 			logger.Errorf("ws write error: session=%s err=%v", sessionName, err)
 			break
 		}
