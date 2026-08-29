@@ -538,11 +538,14 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		for range pingTicker.C {
 			// Set a write deadline so a half-open TCP write fails fast
 			// instead of buffering indefinitely in the OS.
+			// IMPORTANT: clear it after the ping so data writes aren't affected.
 			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-		if err := state.writeMessage(websocket.PingMessage, nil); err != nil {
+			if err := state.writeMessage(websocket.PingMessage, nil); err != nil {
 				logger.Warnf("ws ping failed (half-open detected): session=%s err=%v", sessionName, err)
 				return
 			}
+			// Clear write deadline so the main data-write loop isn't constrained
+			conn.SetWriteDeadline(time.Time{})
 		}
 	}()
 

@@ -292,7 +292,7 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
 
 <div id="app-view">
   <div id="header">
-    <h1 id="ws-dot" title="点击重新连接">webtmux</h1>
+    <h1 id="ws-dot" class="disconnected" title="点击重新连接">webtmux</h1>
     <div id="tabs">
       <div class="tab active" data-tab="activity">Activity</div>
       <div class="tab" data-tab="terminal">Terminal</div>
@@ -509,11 +509,20 @@ function setWsStatus(state){
 let autoReconnectTimer=null;
 let reconnectAttempts=0;
 const MAX_RECONNECT_DELAY=30000;  // 最大 30s
+const MAX_RECONNECT_ATTEMPTS=8;   // 超过此次数后弹 overlay 让用户手动介入
 function scheduleAutoReconnect(){
   // 只在有 session 时自动重连
   if(!currentSession)return;
   // 已有 pending 重连则跳过
   if(autoReconnectTimer)return;
+  // 超过最大重连次数: 停止自动重连, 弹 overlay 让用户手动介入
+  if(reconnectAttempts>=MAX_RECONNECT_ATTEMPTS){
+    wsLog('reconnect-giveup',`attempts=${reconnectAttempts}`);
+    setWsStatus('disconnected');
+    status.textContent='连接失败，点击重试';
+    showDisconnectOverlay('多次重连失败，请手动重试',1006);
+    return;
+  }
   // 指数退避: 1s, 2s, 4s, 8s, 16s, 30s, 30s...
   const delay=Math.min(1000*Math.pow(2,reconnectAttempts),MAX_RECONNECT_DELAY);
   wsLog('reconnect-scheduled',`attempt=${reconnectAttempts+1} delay=${delay}ms`);
@@ -1555,19 +1564,14 @@ function connect(name){
     ws=null;
     resetCopyMode();
     if(currentSession){
-      const reason=e.code===4000?'连接超时，无数据传输':
-                    e.code===1006?'网络异常断开':
-                    e.code===1000?'会话正常断开':
-                    e.code===1001?'服务器关闭连接':
-                    `连接关闭 (${e.code})`;
-      // 1000=正常关闭, 不自动重连; 其他异常自动重连
+      // 1000=正常关闭, 不自动重连, 显示 overlay 让用户手动重连
       if(e.code===1000){
+        const reason='会话正常断开';
         showDisconnectOverlay(reason,e.code);
-      }else{
-        // 先显示 overlay（用户可选择手动重连），同时后台指数退避自动重连
-        showDisconnectOverlay(reason,e.code);
-        scheduleAutoReconnect();
+        return;
       }
+      // 异常断开: 自动重连, 不弹 overlay (用户无感)
+      scheduleAutoReconnect();
     }
   };
   // Only set onData handler once
