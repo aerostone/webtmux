@@ -56,7 +56,7 @@ func loadWithArgs(args []string) (*Config, error) {
 		MaxLoginAttempts: 5,
 		LoginWindowSec:  300,
 		LoginLockoutSec: 900,
-		WSTimeoutSec:    300,
+		WSTimeoutSec:    0,
 		WebAuthnRPID:    "localhost",
 		WebAuthnOrigin:  "http://localhost:8080",
 		WebAuthnDir:     "~/.webtmux",

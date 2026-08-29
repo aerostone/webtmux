@@ -147,7 +147,13 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
 .create-row input:focus{outline:none;border-color:#58a6ff}
 
 /* Status */
-#status{background:#161b22;padding:3px 10px;font-size:11px;color:#8b949e;border-top:1px solid #30363d;flex-shrink:0;display:flex;justify-content:space-between;align-items:center}
+#status{background:#161b22;padding:3px 10px;font-size:11px;color:#8b949e;border-top:1px solid #30363d;flex-shrink:0;display:flex;justify-content:space-between;align-items:center;gap:6px}
+#status-left{display:flex;align-items:center;gap:6px}
+#ws-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;background:#484f58}
+#ws-dot.connected{background:#3fb950}
+#ws-dot.connecting{background:#d29922;animation:ws-blink 0.8s infinite}
+#ws-dot.disconnected{background:#f85149}
+@keyframes ws-blink{0%,100%{opacity:1}50%{opacity:0.2}}
 
 /* Disconnect overlay */
 #disconnect-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:999;align-items:center;justify-content:center;flex-direction:column;gap:16px}
@@ -442,7 +448,7 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
   </div>
 
   <div id="status">
-    <span id="status-text">Disconnected</span>
+    <span id="status-left"><span id="ws-dot"></span><span id="status-text">Disconnected</span></span>
     <span id="mod-status"></span>
   </div>
 </div>
@@ -461,12 +467,13 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
 const $=id=>document.getElementById(id);
 const loginView=$('login-view'), appView=$('app-view');
 const status=$('status-text'), modStatus=$('mod-status');
+const wsDot=$('ws-dot');
 const disconnectOverlay=$('disconnect-overlay'), disconnectReason=$('disconnect-reason');
 let ws=null, term=null, fitAddon=null;
 let activeModifiers=new Set();
 let ptySizeSent=false;
 let currentSession=null;
-let wsTimeoutSec=300;
+let wsTimeoutSec=0;  // 0=disabled (backend ping/pong handles half-open); set via /api/config
 
 // Fetch config from server
 fetch('/api/config').then(r=>r.ok?r.json():{}).then(c=>{
@@ -474,6 +481,36 @@ fetch('/api/config').then(r=>r.ok?r.json():{}).then(c=>{
   if(c.sentry_dsn)Sentry.init(c.sentry_dsn);
 }).catch(()=>{});
 let wsTimeoutTimer=null;
+
+// ── WS status indicator ──
+// connected=绿稳, connecting=黄闪, disconnected=红
+function setWsStatus(state){
+  wsDot.className=state;
+}
+
+// ── Auto-reconnect with exponential backoff ──
+let autoReconnectTimer=null;
+let reconnectAttempts=0;
+const MAX_RECONNECT_DELAY=30000;  // 最大 30s
+function scheduleAutoReconnect(){
+  // 只在终端 tab 且有 session 时自动重连
+  if(!currentSession)return;
+  // 已有 pending 重连则跳过
+  if(autoReconnectTimer)return;
+  // 指数退避: 1s, 2s, 4s, 8s, 16s, 30s, 30s...
+  const delay=Math.min(1000*Math.pow(2,reconnectAttempts),MAX_RECONNECT_DELAY);
+  reconnectAttempts++;
+  setWsStatus('connecting');
+  status.textContent=`重连中... (${reconnectAttempts})`;
+  autoReconnectTimer=setTimeout(()=>{
+    autoReconnectTimer=null;
+    connect(currentSession);
+  },delay);
+}
+function resetReconnectState(){
+  if(autoReconnectTimer){clearTimeout(autoReconnectTimer);autoReconnectTimer=null;}
+  reconnectAttempts=0;
+}
 
 // ─── Plugin Registry ───
 const plugins=[];
@@ -918,9 +955,10 @@ $('reconnect-btn').addEventListener('click',()=>{
 });
 
 // ─── WS timeout reset ───
+// wsTimeoutSec=0 disables the data-idle timeout (backend ping/pong detects half-open).
 function resetWsTimeout(){
   if(wsTimeoutTimer)clearTimeout(wsTimeoutTimer);
-  if(ws?.readyState===WebSocket.OPEN){
+  if(wsTimeoutSec>0&&ws?.readyState===WebSocket.OPEN){
     wsTimeoutTimer=setTimeout(()=>{
       if(ws)ws.close(4000,'timeout');
     },wsTimeoutSec*1000);
@@ -1426,6 +1464,7 @@ initPluginHandlers();
 // ─── Connection ───
 function connect(name){
   hideDisconnectOverlay();
+  resetReconnectState();  // 用户主动连接/重连，重置退避状态
   if(ws){ws.onclose=null;ws.close()}
   currentSession=name;
   ptySizeSent=false;
@@ -1435,9 +1474,12 @@ function connect(name){
   // [fix] 重连时清空终端旧内容，避免旧缓冲区与新连接整屏重发叠加导致混乱
   if(term)term.clear();
   const proto=location.protocol==='https:'?'wss:':'ws:';
+  setWsStatus('connecting');
   ws=new WebSocket(`${proto}//${location.host}/ws?session=${name}`);
   ws.binaryType='arraybuffer';
   ws.onopen=()=>{
+    setWsStatus('connected');
+    resetReconnectState();  // 连接成功，重置退避
     status.textContent=`Connected: ${name}`;
     setTimeout(()=>{
       const oldCols=term.cols,oldRows=term.rows;
@@ -1487,6 +1529,7 @@ function connect(name){
     resetWsTimeout();
   };
   ws.onclose=e=>{
+    setWsStatus('disconnected');
     status.textContent='Disconnected';
     if(wsTimeoutTimer)clearTimeout(wsTimeoutTimer);
     ws=null;
@@ -1497,7 +1540,14 @@ function connect(name){
                     e.code===1000?'会话正常断开':
                     e.code===1001?'服务器关闭连接':
                     `连接关闭 (${e.code})`;
-      showDisconnectOverlay(reason,e.code);
+      // 1000=正常关闭, 不自动重连; 其他异常自动重连
+      if(e.code===1000){
+        showDisconnectOverlay(reason,e.code);
+      }else{
+        // 先显示 overlay（用户可选择手动重连），同时后台指数退避自动重连
+        showDisconnectOverlay(reason,e.code);
+        scheduleAutoReconnect();
+      }
     }
   };
   // Only set onData handler once
@@ -1527,8 +1577,10 @@ if($('terminal-container'))resizeObs.observe($('terminal-container'));
 
 $('logout-btn').addEventListener('click',async()=>{
   currentSession=null;
+  resetReconnectState();
   hideDisconnectOverlay();
   await fetch('/api/logout');if(ws)ws.close();if(term)term.clear();
+  setWsStatus('disconnected');
   activeModifiers.clear();
   modRowInner.querySelectorAll('.key').forEach(k=>k.classList.remove('active-mod'));
   updateModStatus();
@@ -1680,6 +1732,14 @@ await checkWebAuthn();
 checkSession();
 })();
 setInterval(loadSessionsList,10000);
+
+// 页面重新可见时，如果 WS 已断开则自动重连
+// （手机切后台再切回、切换 tab 等场景）
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='visible'&&currentSession&&ws?.readyState!==WebSocket.OPEN){
+    scheduleAutoReconnect();
+  }
+});
 </script>
 </body>
 </html>
