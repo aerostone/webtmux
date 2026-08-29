@@ -1432,6 +1432,8 @@ function connect(name){
   // [fix] 重连时清理合帧缓冲区，避免旧连接残留数据 + 未 flush 的 rAF 导致新连接不渲染
   connect._rxBuf=[]; connect._rxScheduled=false; connect._rxBytes=0;
   connect._rxGen=(connect._rxGen||0)+1;  // 代次标记：使旧的 rAF 回调失效
+  // [fix] 重连时清空终端旧内容，避免旧缓冲区与新连接整屏重发叠加导致混乱
+  if(term)term.clear();
   const proto=location.protocol==='https:'?'wss:':'ws:';
   ws=new WebSocket(`${proto}//${location.host}/ws?session=${name}`);
   ws.binaryType='arraybuffer';
@@ -1446,17 +1448,28 @@ function connect(name){
     ptySizeSent=true;
     resetWsTimeout();
   };
+  ws.onerror=()=>{
+    // [fix] 网络异常（半开连接/DNS失败等）时主动关闭，触发 onclose
+    // 让用户看到断开提示，而不是在无响应的连接上等待 5 分钟超时。
+    // 只主动关，不重复弹 overlay（onclose 会处理）。
+    if(ws&&ws.readyState===WebSocket.OPEN){
+      try{ws.close(1006,'network error')}catch(e){}
+    }
+  };
   ws.onmessage=e=>{
     const buf=e.data instanceof ArrayBuffer?new Uint8Array(e.data):(typeof e.data==='string'?new TextEncoder().encode(e.data):e.data);
     // [fix] 合帧：同一帧(rAF)内到达的多个 chunk 先累积，统一在下一帧开头一次性 write。
     // 重连时 connect._rxGen 递增，使旧连接的 rAF 回调失效。
+    // 节流：即使数据洪流，最多 ~33fps（30ms 间隔）刷一次，防止“一直刷”。
     if(!connect._rxBuf){connect._rxBuf=[];connect._rxScheduled=false;connect._rxBytes=0;}
     connect._rxBuf.push(buf);
     connect._rxBytes+=(buf?.length||e.data?.length||0);
     if(!connect._rxScheduled){
       connect._rxScheduled=true;
       const gen=connect._rxGen||0;
-      requestAnimationFrame(()=>{
+      // 用 setTimeout(32ms) 节流代替 rAF：rAF 是 60fps，高频率洪流时仍会连续刷。
+      // 32ms (~30fps) 既能合帧又限制最大刷新率，让数据洪流不会一直刷。
+      setTimeout(()=>{
         if(connect._rxGen!==gen)return;
         connect._rxScheduled=false;
         const chunks=connect._rxBuf;
@@ -1469,7 +1482,7 @@ function connect(name){
         let off=0;
         for(const c of chunks){ if(c&&c.length){ merged.set(c,off); off+=c.length; } }
         term.write(merged);
-      });
+      },32);
     }
     resetWsTimeout();
   };

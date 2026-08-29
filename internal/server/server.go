@@ -518,11 +518,27 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			WithSession(sessionName), WithRemote(r.RemoteAddr))
 	}
 
+	// ── Half-open connection detection ──
+	// Set an initial read deadline; the pong handler and ping ticker will keep
+	// resetting it. If we don't receive a pong within 2× ping interval (60s),
+	// the read loop errors out and the connection is torn down — preventing
+	// data from accumulating against a dead/half-open TCP connection and
+	// flooding the client when the network recovers.
+	const pingInterval = 30 * time.Second
+	conn.SetReadDeadline(time.Now().Add(2 * pingInterval))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(2 * pingInterval))
+		return nil
+	})
+
 	// Start ping ticker for keepalive (keep connection alive through proxies)
-	pingTicker := time.NewTicker(30 * time.Second)
+	pingTicker := time.NewTicker(pingInterval)
 	defer pingTicker.Stop()
 	go func() {
 		for range pingTicker.C {
+			// Set a write deadline so a half-open TCP write fails fast
+			// instead of buffering indefinitely in the OS.
+			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := state.writeMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
