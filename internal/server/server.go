@@ -539,7 +539,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			// Set a write deadline so a half-open TCP write fails fast
 			// instead of buffering indefinitely in the OS.
 			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := state.writeMessage(websocket.PingMessage, nil); err != nil {
+		if err := state.writeMessage(websocket.PingMessage, nil); err != nil {
+				logger.Warnf("ws ping failed (half-open detected): session=%s err=%v", sessionName, err)
 				return
 			}
 		}
@@ -551,7 +552,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		for {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
-				logger.Errorf("ws read error: session=%s err=%v", sessionName, err)
+				// Distinguish half-open (read deadline / pong timeout) from normal close
+				if strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "i/o deadline") {
+					logger.Warnf("ws read timeout (pong not received, half-open): session=%s err=%v", sessionName, err)
+				} else {
+					logger.Errorf("ws read error: session=%s err=%v", sessionName, err)
+				}
 				break
 			}
 			// Try to parse as resize JSON

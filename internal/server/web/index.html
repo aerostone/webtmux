@@ -147,13 +147,15 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
 .create-row input:focus{outline:none;border-color:#58a6ff}
 
 /* Status */
-#status{background:#161b22;padding:3px 10px;font-size:11px;color:#8b949e;border-top:1px solid #30363d;flex-shrink:0;display:flex;justify-content:space-between;align-items:center;gap:6px}
-#status-left{display:flex;align-items:center;gap:6px}
-#ws-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;background:#484f58}
-#ws-dot.connected{background:#3fb950}
-#ws-dot.connecting{background:#d29922;animation:ws-blink 0.8s infinite}
-#ws-dot.disconnected{background:#f85149}
-@keyframes ws-blink{0%,100%{opacity:1}50%{opacity:0.2}}
+#status{background:#161b22;padding:3px 10px;font-size:11px;color:#8b949e;border-top:1px solid #30363d;flex-shrink:0;display:flex;justify-content:space-between;align-items:center}
+
+/* WS status indicator (on the h1 logo) */
+#ws-dot{cursor:pointer;transition:color .2s,text-shadow .2s}
+#ws-dot.connected{color:#3fb950}
+#ws-dot.connecting{color:#d29922;animation:ws-blink .8s infinite}
+#ws-dot.disconnected{color:#f85149}
+#ws-dot:hover{text-decoration:underline}
+@keyframes ws-blink{0%,100%{opacity:1}50%{opacity:0.4}}
 
 /* Disconnect overlay */
 #disconnect-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:999;align-items:center;justify-content:center;flex-direction:column;gap:16px}
@@ -290,7 +292,7 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
 
 <div id="app-view">
   <div id="header">
-    <h1>webtmux</h1>
+    <h1 id="ws-dot" title="点击重新连接">webtmux</h1>
     <div id="tabs">
       <div class="tab active" data-tab="activity">Activity</div>
       <div class="tab" data-tab="terminal">Terminal</div>
@@ -448,7 +450,7 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
   </div>
 
   <div id="status">
-    <span id="status-left"><span id="ws-dot"></span><span id="status-text">Disconnected</span></span>
+    <span id="status-text">Disconnected</span>
     <span id="mod-status"></span>
   </div>
 </div>
@@ -468,6 +470,7 @@ const $=id=>document.getElementById(id);
 const loginView=$('login-view'), appView=$('app-view');
 const status=$('status-text'), modStatus=$('mod-status');
 const wsDot=$('ws-dot');
+wsDot.addEventListener('click',()=>{if(currentSession)connect(currentSession)});
 const disconnectOverlay=$('disconnect-overlay'), disconnectReason=$('disconnect-reason');
 let ws=null, term=null, fitAddon=null;
 let activeModifiers=new Set();
@@ -482,10 +485,24 @@ fetch('/api/config').then(r=>r.ok?r.json():{}).then(c=>{
 }).catch(()=>{});
 let wsTimeoutTimer=null;
 
-// ── WS status indicator ──
-// connected=绿稳, connecting=黄闪, disconnected=红
+// ── WS lifecycle logging (for observability) ──
+// 事件环缓冲区，保留最近 20 条连接事件，同时输出到 console
+const wsEvents=[];
+const WS_EVENT_MAX=20;
+function wsLog(type,detail){
+  const ev={t:new Date(),type,detail:detail||''};
+  wsEvents.push(ev);
+  if(wsEvents.length>WS_EVENT_MAX)wsEvents.shift();
+  const ts=ev.t.toTimeString().slice(0,8);
+  console.info(`[ws] ${ts} ${type} ${detail||''}`);
+}
+// ── WS status indicator (on the logo) ──
+// connected=绿, connecting=黄闪, disconnected=红
 function setWsStatus(state){
   wsDot.className=state;
+  if(state==='connecting')wsDot.title='重连中...';
+  else if(state==='connected')wsDot.title='已连接';
+  else wsDot.title='已断开 (点击重连)';
 }
 
 // ── Auto-reconnect with exponential backoff ──
@@ -493,12 +510,13 @@ let autoReconnectTimer=null;
 let reconnectAttempts=0;
 const MAX_RECONNECT_DELAY=30000;  // 最大 30s
 function scheduleAutoReconnect(){
-  // 只在终端 tab 且有 session 时自动重连
+  // 只在有 session 时自动重连
   if(!currentSession)return;
   // 已有 pending 重连则跳过
   if(autoReconnectTimer)return;
   // 指数退避: 1s, 2s, 4s, 8s, 16s, 30s, 30s...
   const delay=Math.min(1000*Math.pow(2,reconnectAttempts),MAX_RECONNECT_DELAY);
+  wsLog('reconnect-scheduled',`attempt=${reconnectAttempts+1} delay=${delay}ms`);
   reconnectAttempts++;
   setWsStatus('connecting');
   status.textContent=`重连中... (${reconnectAttempts})`;
@@ -1468,6 +1486,7 @@ function connect(name){
   if(ws){ws.onclose=null;ws.close()}
   currentSession=name;
   ptySizeSent=false;
+  wsLog('connect',name);
   // [fix] 重连时清理合帧缓冲区，避免旧连接残留数据 + 未 flush 的 rAF 导致新连接不渲染
   connect._rxBuf=[]; connect._rxScheduled=false; connect._rxBytes=0;
   connect._rxGen=(connect._rxGen||0)+1;  // 代次标记：使旧的 rAF 回调失效
@@ -1478,6 +1497,7 @@ function connect(name){
   ws=new WebSocket(`${proto}//${location.host}/ws?session=${name}`);
   ws.binaryType='arraybuffer';
   ws.onopen=()=>{
+    wsLog('open',name);
     setWsStatus('connected');
     resetReconnectState();  // 连接成功，重置退避
     status.textContent=`Connected: ${name}`;
@@ -1490,10 +1510,9 @@ function connect(name){
     ptySizeSent=true;
     resetWsTimeout();
   };
-  ws.onerror=()=>{
+  ws.onerror=e=>{
+    wsLog('error',ws?`readyState=${ws.readyState}`:'null');
     // [fix] 网络异常（半开连接/DNS失败等）时主动关闭，触发 onclose
-    // 让用户看到断开提示，而不是在无响应的连接上等待 5 分钟超时。
-    // 只主动关，不重复弹 overlay（onclose 会处理）。
     if(ws&&ws.readyState===WebSocket.OPEN){
       try{ws.close(1006,'network error')}catch(e){}
     }
@@ -1529,6 +1548,7 @@ function connect(name){
     resetWsTimeout();
   };
   ws.onclose=e=>{
+    wsLog('close',`code=${e.code} reason="${e.reason||''}" clean=${e.wasClean}`);
     setWsStatus('disconnected');
     status.textContent='Disconnected';
     if(wsTimeoutTimer)clearTimeout(wsTimeoutTimer);
@@ -1737,6 +1757,7 @@ setInterval(loadSessionsList,10000);
 // （手机切后台再切回、切换 tab 等场景）
 document.addEventListener('visibilitychange',()=>{
   if(document.visibilityState==='visible'&&currentSession&&ws?.readyState!==WebSocket.OPEN){
+    wsLog('visibilitychange','page visible, ws not open, triggering reconnect');
     scheduleAutoReconnect();
   }
 });
