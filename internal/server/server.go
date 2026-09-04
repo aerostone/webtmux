@@ -49,10 +49,11 @@ type Server struct {
 // wsConnState tracks WebSocket connection and its tmux process
 // to ensure clean shutdown before accepting new connections
 type wsConnState struct {
-	conn     *websocket.Conn
-	ptmx     tmux.Resizable
-	cmdDone  chan struct{} // closed when tmux process exits
-	writeMu  sync.Mutex    // serializes all writes to conn (gorilla/websocket is not concurrency-safe)
+	conn      *websocket.Conn
+	ptmx      tmux.Resizable
+	cmdDone   chan struct{} // closed when tmux process exits
+	writeMu   sync.Mutex    // serializes all writes to conn (gorilla/websocket is not concurrency-safe)
+	closeOnce sync.Once     // ensures markDead runs only once across goroutines
 }
 
 // writeMessage is the single serialized write path for a WebSocket connection.
@@ -62,6 +63,26 @@ func (st *wsConnState) writeMessage(messageType int, data []byte) error {
 	st.writeMu.Lock()
 	defer st.writeMu.Unlock()
 	return st.conn.WriteMessage(messageType, data)
+}
+
+// markDead tears down a connection that is no longer usable (half-open pong
+// timeout, ping write failure, tmux/pty read error, or ws write error).
+//
+// It closes the pty first (so the main output pump's ptmx.Read returns and
+// the tmux attach child is killed) then closes the WebSocket (so the client
+// gets an onclose → red indicator). Without this, a half-open read-loop break
+// leaves the main pump blocked in ptmx.Read forever: the conn stays OPEN on
+// the client (green logo) but input is silently dropped (read-only feel).
+// sync.Once makes concurrent calls from the three goroutines (read loop, ping
+// ticker, main pump) safe and idempotent.
+func (st *wsConnState) markDead(reason string) {
+	st.closeOnce.Do(func() {
+		if st.ptmx != nil {
+			st.ptmx.Close()
+		}
+		st.conn.Close()
+		logger.Infof("ws conn marked dead: %s", reason)
+	})
 }
 
 // closeAllConns closes all active WebSocket connections
@@ -503,8 +524,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	ptmx, err := s.tmux.AttachSession(sessionName)
 	if err != nil {
 		logger.Errorf("ws attach failed: session=%s err=%v", sessionName, err)
-		conn.WriteMessage(websocket.TextMessage,
-			[]byte("error: cannot attach to session"))
+		// Send a real close frame (1011 = internal error) so the client
+		// transitions to disconnected (red) instead of lingering green after
+		// onopen, and doesn't treat a stray text message as terminal output.
+		conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(1011, "cannot attach to session"))
 		return
 	}
 	state.ptmx = ptmx
@@ -542,6 +566,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := state.writeMessage(websocket.PingMessage, nil); err != nil {
 				logger.Warnf("ws ping failed (half-open detected): session=%s err=%v", sessionName, err)
+				state.markDead("ping failed")
 				return
 			}
 			// Clear write deadline so the main data-write loop isn't constrained
@@ -561,6 +586,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				} else {
 					logger.Errorf("ws read error: session=%s err=%v", sessionName, err)
 				}
+				// Tear down conn + pty so the main pump exits instead of
+				// hanging on ptmx.Read with a green-but-dead client connection.
+				state.markDead("read loop exited")
 				break
 			}
 			// Try to parse as resize JSON
@@ -590,10 +618,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		n, err := ptmx.Read(buf)
 		if err != nil {
 			logger.Errorf("ws tmux read error: session=%s err=%v", sessionName, err)
+			state.markDead("tmux read error")
 			break
 		}
 		if err := state.writeMessage(websocket.BinaryMessage, buf[:n]); err != nil {
 			logger.Errorf("ws write error: session=%s err=%v", sessionName, err)
+			state.markDead("ws write error")
 			break
 		}
 	}

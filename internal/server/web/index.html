@@ -1507,9 +1507,10 @@ function connect(name){
   ws.binaryType='arraybuffer';
   ws.onopen=()=>{
     wsLog('open',name);
-    setWsStatus('connected');
-    resetReconnectState();  // 连接成功，重置退避
-    status.textContent=`Connected: ${name}`;
+    // [fix] onopen 只代表 WS 握手成功，不代表后端 attach 成功/连接健康。
+    // 保持 connecting(黄闪) 直到收到首帧数据，避免 attach 失败/half-open 时误显绿色。
+    resetReconnectState();  // 握手成功，重置退避
+    status.textContent=`握手完成: ${name}`;
     setTimeout(()=>{
       const oldCols=term.cols,oldRows=term.rows;
       fitAddon.fit();
@@ -1527,6 +1528,8 @@ function connect(name){
     }
   };
   ws.onmessage=e=>{
+    // [fix] 首帧数据到达才确认 connected(绿)：握手成功 + attach 成功 + 有真实输出
+    if(!ws._readyConfirmed){ws._readyConfirmed=true;setWsStatus('connected');status.textContent=`Connected: ${currentSession}`;}
     const buf=e.data instanceof ArrayBuffer?new Uint8Array(e.data):(typeof e.data==='string'?new TextEncoder().encode(e.data):e.data);
     // [fix] 合帧：同一帧(rAF)内到达的多个 chunk 先累积，统一在下一帧开头一次性 write。
     // 重连时 connect._rxGen 递增，使旧连接的 rAF 回调失效。
