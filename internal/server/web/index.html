@@ -466,6 +466,14 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
 <script>
 // UMD bundles: Terminal and FitAddon are globals from <script src> above
 
+// Unify loopback addresses to "localhost": WebAuthn binds credentials to the
+// rpId (= hostname), so a fingerprint registered at "localhost" is unusable
+// from "127.0.0.1" (and vice versa) — the browser throws NotAllowedError.
+// Redirect 127.0.0.1/::1/0.0.0.0 → localhost so a single fingerprint works
+// across all loopback addresses (e.g. SSH port-forward). Non-loopback hosts
+// (LAN IP / domain) are left untouched.
+(function(){var h=location.hostname;if(h==='127.0.0.1'||h==='::1'||h==='0.0.0.0'){location.replace(location.protocol+'//localhost:'+location.port+location.pathname+location.search+location.hash)}})();
+
 const $=id=>document.getElementById(id);
 const loginView=$('login-view'), appView=$('app-view');
 const status=$('status-text'), modStatus=$('mod-status');
@@ -1156,7 +1164,10 @@ $('kill-modal-fp').addEventListener('click',async()=>{
     if(!authRes.ok){$('kill-modal-error').textContent='指纹验证失败';return}
     await api('POST','/api/sessions/kill',{name:killTargetName});
     hideKillModal();loadSessionsList();
-  }catch(e){if(e.name!=='NotAllowedError')$('kill-modal-error').textContent='指纹验证失败';}
+  }catch(e){
+    if(e.name==='NotAllowedError')$('kill-modal-error').textContent='指纹验证被取消，或凭证与访问地址不匹配';
+    else $('kill-modal-error').textContent='指纹验证失败';
+  }
 });
 
 function connectSession(name){
@@ -1324,7 +1335,10 @@ $('fm-delete-modal-fp').addEventListener('click',async()=>{
     const r=await fetch('/api/files?action=delete-dir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:fmDeleteTarget.path})});
     if(r.ok){$('fm-status').textContent='已删除';fmLoadDir(fmCurrentPath)}
     else{const d=await r.json();$('fm-status').textContent='删除失败: '+d.error}
-  }catch(e){if(e.name!=='NotAllowedError')$('fm-delete-modal-error').textContent='指纹验证失败';}
+  }catch(e){
+    if(e.name==='NotAllowedError')$('fm-delete-modal-error').textContent='指纹验证被取消，或凭证与访问地址不匹配';
+    else $('fm-delete-modal-error').textContent='指纹验证失败';
+  }
   hideFmDeleteModal();
 });
 // File manager event listeners
@@ -1686,7 +1700,8 @@ $('fingerprint-btn').addEventListener('click',async()=>{
       setTimeout(()=>showApp(),300);
     }else{errEl.innerHTML='<span class="error-icon">✗</span>指纹验证失败';btn.disabled=false;btn.style.opacity='1';}
   }catch(e){
-    if(e.name!=='NotAllowedError')errEl.innerHTML='<span class="error-icon">✗</span>指纹验证失败: '+e.message;
+    if(e.name==='NotAllowedError')errEl.innerHTML='<span class="error-icon">✗</span>指纹验证被取消，或凭证与访问地址不匹配（localhost 与 127.0.0.1 对指纹是不同的）';
+    else errEl.innerHTML='<span class="error-icon">✗</span>指纹验证失败: '+e.message;
     btn.disabled=false;btn.style.opacity='1';
   }
 });
@@ -1721,7 +1736,8 @@ async function enableFingerprint(){
       alert('指纹注册成功！下次可以直接用指纹登录');
     }else{alert('指纹注册失败')}
   }catch(e){
-    if(e.name!=='NotAllowedError')alert('指纹注册失败: '+e.message);
+    if(e.name==='NotAllowedError')alert('指纹注册被取消，或当前访问地址不支持指纹注册');
+    else alert('指纹注册失败: '+e.message);
   }
 }
 
