@@ -466,13 +466,13 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
 <script>
 // UMD bundles: Terminal and FitAddon are globals from <script src> above
 
-// Unify loopback addresses to "localhost": WebAuthn binds credentials to the
-// rpId (= hostname), so a fingerprint registered at "localhost" is unusable
-// from "127.0.0.1" (and vice versa) — the browser throws NotAllowedError.
-// Redirect 127.0.0.1/::1/0.0.0.0 → localhost so a single fingerprint works
+// Unify loopback addresses to "127.0.0.1": WebAuthn binds credentials to the
+// rpId (= hostname), so a fingerprint registered at "127.0.0.1" is unusable
+// from "localhost" (and vice versa) — the browser throws NotAllowedError.
+// Redirect localhost/::1/0.0.0.0 → 127.0.0.1 so a single fingerprint works
 // across all loopback addresses (e.g. SSH port-forward). Non-loopback hosts
 // (LAN IP / domain) are left untouched.
-(function(){var h=location.hostname;if(h==='127.0.0.1'||h==='::1'||h==='0.0.0.0'){location.replace(location.protocol+'//localhost:'+location.port+location.pathname+location.search+location.hash)}})();
+(function(){var h=location.hostname;if(h==='localhost'||h==='::1'||h==='0.0.0.0'){location.replace(location.protocol+'//127.0.0.1:'+location.port+location.pathname+location.search+location.hash)}})();
 
 const $=id=>document.getElementById(id);
 const loginView=$('login-view'), appView=$('app-view');
