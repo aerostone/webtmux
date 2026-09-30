@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/creack/pty"
 
@@ -48,10 +49,13 @@ func (m *Manager) KillSession(name string) error {
 }
 
 // Resizable is an io.ReadWriteCloser that supports terminal resize.
+// Done reports when the underlying child process has been reaped (Wait
+// returned) and is safe to wait on during connection replacement.
 type Resizable interface {
 	io.ReadWriteCloser
 	Resize(cols, rows int) error
 	PID() int
+	Done() <-chan struct{}
 }
 
 func (m *Manager) AttachSession(name string) (Resizable, error) {
@@ -63,7 +67,15 @@ func (m *Manager) AttachSession(name string) (Resizable, error) {
 	if err != nil {
 		return nil, fmt.Errorf("tmux attach %q: %w", name, err)
 	}
-	return &ptyConn{ptmx: ptmx, cmd: cmd}, nil
+	c := &ptyConn{ptmx: ptmx, cmd: cmd, done: make(chan struct{})}
+	// Reap the child as soon as it exits. Calling Process.Kill without a
+	// matching Wait would leave a zombie + pidfd behind on every detach,
+	// accumulating without bound.
+	go func() {
+		defer close(c.done)
+		c.cmd.Wait()
+	}()
+	return c, nil
 }
 
 func (m *Manager) tmuxArgs(parts ...string) []string {
@@ -76,15 +88,24 @@ func (m *Manager) tmuxArgs(parts ...string) []string {
 type ptyConn struct {
 	ptmx *os.File
 	cmd  *exec.Cmd
+	done chan struct{} // closed by the reaper goroutine after cmd.Wait() returns
+
+	closeOnce sync.Once
 }
 
 func (c *ptyConn) Read(p []byte) (int, error)  { return c.ptmx.Read(p) }
 func (c *ptyConn) Write(p []byte) (int, error) { return c.ptmx.Write(p) }
 func (c *ptyConn) Close() error {
-	c.ptmx.Close()
-	if c.cmd.Process != nil {
-		c.cmd.Process.Kill()
-	}
+	// First Close wins: close pty (unblocks Read pump) then kill the child.
+	// The reaper goroutine started in AttachSession performs the matching
+	// Wait(), so the child is always reaped exactly once regardless of how
+	// many times Close is called or who killed the child first.
+	c.closeOnce.Do(func() {
+		c.ptmx.Close()
+		if c.cmd.Process != nil {
+			c.cmd.Process.Kill()
+		}
+	})
 	return nil
 }
 
@@ -94,6 +115,9 @@ func (c *ptyConn) PID() int {
 	}
 	return 0
 }
+
+// Done is closed once the child process has exited and been reaped.
+func (c *ptyConn) Done() <-chan struct{} { return c.done }
 
 func (c *ptyConn) Resize(cols, rows int) error {
 	return pty.Setsize(c.ptmx, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
@@ -113,14 +137,25 @@ func splitPipe(s string) []string { return strings.Split(s, "|") }
 
 // KillOrphan finds and kills orphaned tmux attach-session processes for a specific session.
 // This prevents duplicate input when the server crashes and restarts.
+// Matching is exact on the session name: a naive substring search for
+// "-t dev" would also match "-t dev2", killing unrelated sessions.
 func KillOrphan(sessionName string) {
-	out, err := exec.Command("pgrep", "-f", "tmux attach-session -t "+sessionName).Output()
+	// List candidate attach clients with their full command lines, then
+	// filter for an exact "-t <name>" argument pair.
+	out, err := exec.Command("pgrep", "-af", "tmux attach-session").Output()
 	if err != nil {
-		return // no orphaned process
+		return // no attach clients at all
 	}
-	for _, pidStr := range strings.Fields(strings.TrimSpace(string(out))) {
-		pid, err := strconv.Atoi(strings.TrimSpace(pidStr))
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 1 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
 		if err != nil {
+			continue
+		}
+		if !hasExactSessionArg(fields[1:], sessionName) {
 			continue
 		}
 		if proc, err := os.FindProcess(pid); err == nil {
@@ -128,6 +163,27 @@ func KillOrphan(sessionName string) {
 			logger.Infof("cleanup: killed orphaned attach handler pid=%d session=%s", pid, sessionName)
 		}
 	}
+}
+
+// hasExactSessionArg reports whether argv contains the exact pair
+// ["-t" sessionName] (or the equivalent ["-t=sessionName"] / merged forms
+// tmux accepts, e.g. "-tname").
+func hasExactSessionArg(argv []string, sessionName string) bool {
+	for i, arg := range argv {
+		if arg == "-t" {
+			if i+1 < len(argv) && argv[i+1] == sessionName {
+				return true
+			}
+			continue
+		}
+		if rest, ok := strings.CutPrefix(arg, "-t"); ok && rest != "" {
+			// Forms: -tname, -t=name. Strip a leading '=' for the latter.
+			if strings.TrimPrefix(rest, "=") == sessionName {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func parseInt(s string) int {

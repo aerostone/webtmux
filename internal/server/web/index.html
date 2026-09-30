@@ -514,6 +514,9 @@ function setWsStatus(state){
 }
 
 // ── Auto-reconnect with exponential backoff ──
+// [refresh-fix] 接收合帧窗口（毫秒）。20fps：限制 xterm 最大绘制频率，
+// 让 pi 流式输出的“一直刷”更“静”；改这一个数即可调刷新节奏。
+const RX_COALESCE_MS=50;
 let autoReconnectTimer=null;
 let reconnectAttempts=0;
 const MAX_RECONNECT_DELAY=30000;  // 最大 30s
@@ -1545,17 +1548,17 @@ function connect(name){
     // [fix] 首帧数据到达才确认 connected(绿)：握手成功 + attach 成功 + 有真实输出
     if(!ws._readyConfirmed){ws._readyConfirmed=true;setWsStatus('connected');status.textContent=`Connected: ${currentSession}`;}
     const buf=e.data instanceof ArrayBuffer?new Uint8Array(e.data):(typeof e.data==='string'?new TextEncoder().encode(e.data):e.data);
-    // [fix] 合帧：同一帧(rAF)内到达的多个 chunk 先累积，统一在下一帧开头一次性 write。
-    // 重连时 connect._rxGen 递增，使旧连接的 rAF 回调失效。
-    // 节流：即使数据洪流，最多 ~33fps（30ms 间隔）刷一次，防止“一直刷”。
+    // [fix] 合帧：同一窗口内到达的多个 chunk 先累积，统一一次性 write。
+    // 重连时 connect._rxGen 递增，使旧连接的定时器回调失效。
+    // 节流：RX_COALESCE_MS=50ms (~20fps)。rAF(16ms)/32ms 时 pi 流式输出仍
+    // “一直刷”；20fps 对阅读文本已足够流畅，画面更“静”，按键回显仅 +18ms。
+    // （要改刷新节奏只改这一个数。）
     if(!connect._rxBuf){connect._rxBuf=[];connect._rxScheduled=false;connect._rxBytes=0;}
     connect._rxBuf.push(buf);
     connect._rxBytes+=(buf?.length||e.data?.length||0);
     if(!connect._rxScheduled){
       connect._rxScheduled=true;
       const gen=connect._rxGen||0;
-      // 用 setTimeout(32ms) 节流代替 rAF：rAF 是 60fps，高频率洪流时仍会连续刷。
-      // 32ms (~30fps) 既能合帧又限制最大刷新率，让数据洪流不会一直刷。
       setTimeout(()=>{
         if(connect._rxGen!==gen)return;
         connect._rxScheduled=false;
@@ -1563,17 +1566,18 @@ function connect(name){
         connect._rxBuf=[];
         connect._rxBytes=0;
         if(!chunks.length)return;
-        // 拼接同一帧内所有 chunk 成单次写入
+        // 拼接同一窗口内所有 chunk 成单次写入
         let total=0; for(const c of chunks) total+=(c?.length||0);
         const merged=new Uint8Array(total);
         let off=0;
         for(const c of chunks){ if(c&&c.length){ merged.set(c,off); off+=c.length; } }
         term.write(merged);
-      },32);
+      },RX_COALESCE_MS);
     }
     resetWsTimeout();
   };
   ws.onclose=e=>{
+    const selfClosed=ws?._selfClosed||false;
     wsLog('close',`code=${e.code} reason="${e.reason||''}" clean=${e.wasClean}`);
     setWsStatus('disconnected');
     status.textContent='Disconnected';
@@ -1583,6 +1587,12 @@ function connect(name){
     if(currentSession){
       // 1000=正常关闭, 不自动重连, 显示 overlay 让用户手动重连
       if(e.code===1000){
+        // [refresh-fix] 页面隐藏超 5s 的自断（后台防积压）：不弹 overlay，
+        // 回到前台时 visibilitychange 会自动重连，tmux 重发整屏 = 一帧干净画面
+        if(selfClosed){
+          wsLog('close','self-closed (hidden), overlay suppressed; will auto-reconnect on visible');
+          return;
+        }
         const reason='会话正常断开';
         showDisconnectOverlay(reason,e.code);
         return;
@@ -1600,19 +1610,45 @@ function connect(name){
 
 function sendResize(){
   if(!term||!ws||ws.readyState!==WebSocket.OPEN)return;
+  // [refresh-fix] 记录已发送尺寸，供 resize 滞回判断（回摆/小幅抖动识别）
+  lastSentCols=term.cols;lastSentRows=term.rows;lastSentAt=Date.now();
   ws.send(JSON.stringify({cols:term.cols,rows:term.rows}));
 }
 
-// Debounced resize on terminal container size changes
-let resizeTimer=null;
+// Debounced + hysteresis resize on terminal container size changes.
+// [refresh-fix] 手机浏览器 URL 栏收展/手势会让视口抖 ±3~5 行；以前每次“稳定
+// 后的变化”都会 sendResize → tmux 窗口 resize → pi 高度变化 → fullRender
+// （整屏黑闪+历史重放，最难受的刷新）。现在：
+//   1) 250ms settle：持续无变化才生效
+//   2) 回摆到上次已发送尺寸 → 不发（抖动互相抵消）
+//   3) 小幅变化（同宽且 Δrows≤2 且 3s 内）→ 再等 1.5s，期间回摆则取消，
+//      持续才真正发送；旋转/拖窗等大变化立即发送
+let resizeTimer=null,resizeSettleTimer=null;
+let lastSentCols=0,lastSentRows=0,lastSentAt=0;
+function doFitResize(){
+  if(!term||!fitAddon)return;
+  if(document.hidden){ // 后台时先不发，回前台再算
+    if(resizeSettleTimer)clearTimeout(resizeSettleTimer);
+    resizeSettleTimer=setTimeout(()=>{resizeSettleTimer=null;doFitResize()},1000)
+    return;
+  }
+  const oldCols=term.cols,oldRows=term.rows;
+  fitAddon.fit();
+  if(term.cols===oldCols&&term.rows===oldRows)return;
+  if(!ws||ws.readyState!==WebSocket.OPEN)return;
+  // 回摆到上次已发送的尺寸：不发
+  if(term.cols===lastSentCols&&term.rows===lastSentRows)return;
+  const small=(term.cols===lastSentCols)&&Math.abs(term.rows-lastSentRows)<=2;
+  if(small&&lastSentAt&&Date.now()-lastSentAt<3000){
+    if(resizeSettleTimer)clearTimeout(resizeSettleTimer);
+    resizeSettleTimer=setTimeout(()=>{resizeSettleTimer=null;doFitResize()},1500);
+    return;
+  }
+  sendResize();
+}
 const resizeObs=new ResizeObserver(()=>{
   if(resizeTimer)clearTimeout(resizeTimer);
-  resizeTimer=setTimeout(()=>{
-    if(!term||!fitAddon)return;
-    const oldCols=term.cols,oldRows=term.rows;
-    fitAddon.fit();
-    if(term.cols!==oldCols||term.rows!==oldRows)sendResize();
-  },200);
+  resizeTimer=setTimeout(doFitResize,250);
 });
 if($('terminal-container'))resizeObs.observe($('terminal-container'));
 
@@ -1776,12 +1812,32 @@ checkSession();
 })();
 setInterval(loadSessionsList,10000);
 
-// 页面重新可见时，如果 WS 已断开则自动重连
-// （手机切后台再切回、切换 tab 等场景）
+// 页面可见性变化处理（手机切后台再切回、切换 tab 等场景）
+// [refresh-fix] 隐藏超过 5s 主动断开 WS：后台时浏览器会节流定时器，
+// 服务端持续泵入的数据在 WS/TCP 层积压；网络恢复后积压“冲进来”，
+// 终端会快进式补刷一大段（场景1）。主动断开后服务端立即停止泵数据，
+// 回到前台自动重连，新 attach 由 tmux 重发整屏 = 一帧干净画面。
+let hiddenCloseTimer=null;
 document.addEventListener('visibilitychange',()=>{
-  if(document.visibilityState==='visible'&&currentSession&&ws?.readyState!==WebSocket.OPEN){
-    wsLog('visibilitychange','page visible, ws not open, triggering reconnect');
-    scheduleAutoReconnect();
+  if(document.visibilityState==='hidden'){
+    if(!hiddenCloseTimer){
+      hiddenCloseTimer=setTimeout(()=>{
+        hiddenCloseTimer=null;
+        if(ws&&ws.readyState===WebSocket.OPEN){
+          wsLog('hidden-close','hidden >5s, closing ws to avoid backlog');
+          ws._selfClosed=true;
+          try{ws.close(1000,'hidden')}catch(e){}
+        }
+      },5000);
+    }
+    return;
+  }
+  if(document.visibilityState==='visible'){
+    if(hiddenCloseTimer){clearTimeout(hiddenCloseTimer);hiddenCloseTimer=null;}
+    if(currentSession&&ws?.readyState!==WebSocket.OPEN){
+      wsLog('visibilitychange','page visible, ws not open, triggering reconnect');
+      scheduleAutoReconnect();
+    }
   }
 });
 </script>

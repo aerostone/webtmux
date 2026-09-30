@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"embed"
 	"crypto/subtle"
 	"encoding/base64"
@@ -13,6 +14,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -51,7 +53,7 @@ type Server struct {
 type wsConnState struct {
 	conn      *websocket.Conn
 	ptmx      tmux.Resizable
-	cmdDone   chan struct{} // closed when tmux process exits
+	done        chan struct{} // closed when this WS handler fully returns
 	writeMu   sync.Mutex    // serializes all writes to conn (gorilla/websocket is not concurrency-safe)
 	closeOnce sync.Once     // ensures markDead runs only once across goroutines
 }
@@ -491,26 +493,56 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	s.wsConnMu.Lock()
 	if old, ok := s.wsConns[sessionName]; ok {
 		logger.Infof("ws closing old connection: session=%s", sessionName)
-		
+
+		// Bound the Close frame write: a half-open old connection must not
+		// wedge wsConnMu (and every new handshake) forever.
+		old.conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 		// Send close message to old WebSocket
 		old.writeMessage(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "replaced by new connection"))
-		old.conn.Close()
-		
-		// Wait for old tmux process to exit (max 2 seconds)
+		old.conn.SetWriteDeadline(time.Time{})
+		oldConn := old.conn
+		oldPtmx := old.ptmx
+		oldDone := old.done
+		s.wsConnMu.Unlock()
+
+		// Tear down the old connection outside the lock: kill its tmux
+		// child (markDead hears from it via markDead) and close the socket
+		// so its blocked read/pump loops exit.
+		if oldPtmx != nil {
+			oldPtmx.Close()
+			// Wait for the old tmux child to actually exit and be reaped
+			// (max 2 seconds), so the new attach doesn't overlap with the
+			// old one on the same tmux session.
+			select {
+			case <-oldPtmx.Done():
+				logger.Infof("ws old process exited: session=%s", sessionName)
+			case <-time.After(2 * time.Second):
+				logger.Infof("ws old process timeout: session=%s (proceeding anyway)", sessionName)
+			}
+		}
+		oldConn.Close()
+		// Wait for the old handler to fully return so no goroutine
+		// (ping ticker, read loop) leaks per replacement.
 		select {
-		case <-old.cmdDone:
-			logger.Infof("ws old process exited: session=%s", sessionName)
+		case <-oldDone:
 		case <-time.After(2 * time.Second):
-			logger.Infof("ws old process timeout: session=%s (proceeding anyway)", sessionName)
+			logger.Infof("ws old handler timeout: session=%s (proceeding anyway)", sessionName)
+		}
+
+		s.wsConnMu.Lock()
+		// Another goroutine may have removed/replaced the entry already.
+		if cur, ok := s.wsConns[sessionName]; !ok || cur == old {
+			delete(s.wsConns, sessionName)
 		}
 	}
-	
-	state := &wsConnState{conn: conn, cmdDone: make(chan struct{})}
+
+	state := &wsConnState{conn: conn, done: make(chan struct{})}
 	s.wsConns[sessionName] = state
 	s.wsConnMu.Unlock()
-	
+
 	defer func() {
+		close(state.done)
 		s.wsConnMu.Lock()
 		if s.wsConns[sessionName] == state {
 			delete(s.wsConns, sessionName)
@@ -555,28 +587,45 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 
-	// Start ping ticker for keepalive (keep connection alive through proxies)
+	// Start ping ticker for keepalive (keep connection alive through proxies).
+	// The stop channel guarantees this goroutine exits when the handler
+	// returns: Ticker.Stop alone does NOT close the channel, so ranging over
+	// pingTicker.C would otherwise leak one goroutine per connection.
 	pingTicker := time.NewTicker(pingInterval)
 	defer pingTicker.Stop()
+	pingStop := make(chan struct{})
+	var pingWg sync.WaitGroup
+	pingWg.Add(1)
 	go func() {
-		for range pingTicker.C {
-			// Set a write deadline so a half-open TCP write fails fast
-			// instead of buffering indefinitely in the OS.
-			// IMPORTANT: clear it after the ping so data writes aren't affected.
-			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := state.writeMessage(websocket.PingMessage, nil); err != nil {
-				logger.Warnf("ws ping failed (half-open detected): session=%s err=%v", sessionName, err)
+		defer pingWg.Done()
+		for {
+			select {
+			case <-pingStop:
+				return
+			case t := <-pingTicker.C:
+				_ = t
+				// Set a write deadline so a half-open TCP write fails fast
+				// instead of buffering indefinitely in the OS.
+				// IMPORTANT: clear it after the ping so data writes aren't affected.
+				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err := state.writeMessage(websocket.PingMessage, nil); err != nil {
+					logger.Warnf("ws ping failed (half-open detected): session=%s err=%v", sessionName, err)
 				state.markDead("ping failed")
 				return
+				}
+				// Clear write deadline so the main data-write loop isn't constrained
+				conn.SetWriteDeadline(time.Time{})
 			}
-			// Clear write deadline so the main data-write loop isn't constrained
-			conn.SetWriteDeadline(time.Time{})
 		}
 	}()
+	defer func() { close(pingStop); pingWg.Wait() }()
 
-	// Handle resize messages from client
+	// Handle resize messages from client.
+	// The read loop exits on any read error (normal close, half-open
+	// timeout, ping failure); markDead then tears down pty + socket so the
+	// main pump also exits.
+	var resizeCount int32
 	go func() {
-		defer close(state.cmdDone) // Signal when tmux process exits
 		for {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
@@ -597,6 +646,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				Rows int `json:"rows"`
 			}
 			if json.Unmarshal(msg, &resizeMsg) == nil && resizeMsg.Cols > 0 && resizeMsg.Rows > 0 {
+				atomic.AddInt32(&resizeCount, 1)
 				if err := ptmx.Resize(resizeMsg.Cols, resizeMsg.Rows); err != nil {
 					logger.Errorf("ws resize error: session=%s err=%v", sessionName, err)
 				} else {
@@ -612,23 +662,76 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Read from tmux, write to ws
+	// Read from tmux, write to ws.
+	//
+	// Refresh telemetry: count full-screen redraw markers in the stream so
+	// "how hard the TUI is repainting" can be measured without any help from
+	// the app. ESC[2J (clear screen) / ESC[3J (clear scrollback) occurrences
+	// plus total bytes and the largest 1s byte burst are logged on
+	// disconnect. (Approximate: markers in app text could false-positive.)
+	var (
+		outBytes   int64
+		clear2J    int32
+		clear3J    int32
+		burstBytes int64
+		maxBurst   int64
+		windowEnd  = time.Now().Add(time.Second)
+	)
+	var tail [2]byte // carry so a marker split across two reads is not missed
+	scanBuf := make([]byte, 4096+2)
 	buf := make([]byte, 4096)
 	for {
 		n, err := ptmx.Read(buf)
+		if n > 0 {
+			chunk := buf[:n]
+			outBytes += int64(n)
+			now := time.Now()
+			if now.After(windowEnd) {
+				if burstBytes > maxBurst {
+					maxBurst = burstBytes
+				}
+				burstBytes = 0
+				windowEnd = now.Add(time.Second)
+			}
+			burstBytes += int64(n)
+			scanN := 2 + copy(scanBuf[2:], chunk)
+			scan := scanBuf[:scanN]
+			clear2J += int32(bytes.Count(scan, []byte("\x1b[2J")))
+			clear3J += int32(bytes.Count(scan, []byte("\x1b[3J")))
+			copy(tail[:], scan[len(scan)-2:])
+			// Slow-client backpressure: if the WebSocket write blocks for
+			// more than 2s the browser/network is far behind. Instead of
+			// buffering unboundedly (and making the client fast-forward
+			// through the whole backlog when the network recovers), tear the
+			// connection down: the client auto-reconnects and the fresh tmux
+			// attach resends the full screen — one clean frame instead of a
+			// catch-up rush.
+			state.conn.SetWriteDeadline(now.Add(2 * time.Second))
+			werr := state.writeMessage(websocket.BinaryMessage, chunk)
+			state.conn.SetWriteDeadline(time.Time{})
+			if werr != nil {
+				if ne, ok := werr.(net.Error); ok && ne.Timeout() {
+					logger.Warnf("ws write timeout (slow client, forcing resync): session=%s", sessionName)
+					state.markDead("ws write timeout (slow client)")
+				} else {
+					logger.Errorf("ws write error: session=%s err=%v", sessionName, werr)
+					state.markDead("ws write error")
+				}
+				break
+			}
+		}
 		if err != nil {
 			logger.Errorf("ws tmux read error: session=%s err=%v", sessionName, err)
 			state.markDead("tmux read error")
 			break
 		}
-		if err := state.writeMessage(websocket.BinaryMessage, buf[:n]); err != nil {
-			logger.Errorf("ws write error: session=%s err=%v", sessionName, err)
-			state.markDead("ws write error")
-			break
-		}
 	}
 
-	logger.Infof("ws disconnect: session=%s", sessionName)
+	if burstBytes > maxBurst {
+		maxBurst = burstBytes
+	}
+	logger.Infof("ws disconnect: session=%s out=%dB clear2J=%d clear3J=%d maxBurst1s=%dB resizes=%d",
+		sessionName, outBytes, clear2J, clear3J, maxBurst, atomic.LoadInt32(&resizeCount))
 }
 
 // ─── WebAuthn handlers ───

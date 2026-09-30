@@ -24,7 +24,10 @@ type FileEntry struct {
 	Mode    string `json:"mode"`
 }
 
-// validatePath checks if the path is within allowed root directories
+// validatePath checks if the path is within allowed root directories.
+// The boundary is enforced on path segments (no sibling-prefix bypass like
+// root "/home/x" matching "/home/xevil") and symlinks are resolved so
+// a link inside a root cannot point outside of it.
 func (s *Server) validatePath(path string) (string, error) {
 	// Get allowed roots
 	roots := s.getFileRoots()
@@ -32,14 +35,55 @@ func (s *Server) validatePath(path string) (string, error) {
 	// Clean the path
 	cleaned := filepath.Clean(path)
 
+	// Resolve symlinks so "root/link -> /etc" cannot escape.
+	// If the target does not exist yet (e.g. mkdir destination), resolve
+	// as much of the path as exists.
+	resolved := resolveExisting(cleaned)
+
 	// Check if path is within any allowed root
 	for _, root := range roots {
-		if strings.HasPrefix(cleaned, root) || cleaned == root {
+		rootResolved := resolveExisting(root)
+		if rootResolved == "" {
+			continue
+		}
+		if resolved == rootResolved || isWithinDir(resolved, rootResolved) {
 			return cleaned, nil
 		}
 	}
 
 	return "", fmt.Errorf("access denied: path outside allowed directories")
+}
+
+// resolveExisting returns the EvalSymlinks result of path, falling back to
+// resolving the longest existing ancestor prefix and re-appending the rest.
+func resolveExisting(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	// Walk up until an existing ancestor is found.
+	var suffix []string
+	cur := path
+	for {
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return filepath.Clean(path)
+		}
+		suffix = append([]string{filepath.Base(cur)}, suffix...)
+		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
+			return filepath.Join(append([]string{resolved}, suffix...)...)
+		}
+		cur = parent
+	}
+}
+
+// isWithinDir reports whether target is strictly inside dir (segment
+// boundary, not a raw string prefix).
+func isWithinDir(target, dir string) bool {
+	rel, err := filepath.Rel(dir, target)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // getFileRoots returns list of allowed root directories
@@ -196,37 +240,40 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 
 	uploaded := make([]string, 0, len(files))
 	for _, fh := range files {
-		src, err := fh.Open()
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "open file: " + err.Error()})
+		if err := func() error {
+			src, err := fh.Open()
+			if err != nil {
+				return fmt.Errorf("open file: %w", err)
+			}
+			defer src.Close()
+
+			// Sanitize filename - prevent path traversal
+			filename := filepath.Base(fh.Filename)
+			destPath := filepath.Join(destDir, filename)
+
+			dst, err := os.Create(destPath)
+			if err != nil {
+				return fmt.Errorf("create file: %w", err)
+			}
+			defer dst.Close()
+
+			written, err := io.Copy(dst, src)
+			if err != nil {
+				return fmt.Errorf("write file: %w", err)
+			}
+
+			logger.Infof("file upload: %s (%d bytes) -> %s", filename, written, destPath)
+			uploaded = append(uploaded, filename)
+
+			// Log file upload activity
+			if s.activities != nil {
+				s.activities.Log(ActivityFileUpload, fmt.Sprintf("Uploaded %s (%d bytes)", filename, written),
+					WithPath(destPath))
+			}
+			return nil
+		}(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
-		}
-		defer src.Close()
-
-		// Sanitize filename - prevent path traversal
-		filename := filepath.Base(fh.Filename)
-		destPath := filepath.Join(destDir, filename)
-
-		dst, err := os.Create(destPath)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "create file: " + err.Error()})
-			return
-		}
-		defer dst.Close()
-
-		written, err := io.Copy(dst, src)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "write file: " + err.Error()})
-			return
-		}
-
-		logger.Infof("file upload: %s (%d bytes) -> %s", filename, written, destPath)
-		uploaded = append(uploaded, filename)
-
-		// Log file upload activity
-		if s.activities != nil {
-			s.activities.Log(ActivityFileUpload, fmt.Sprintf("Uploaded %s (%d bytes)", filename, written),
-				WithPath(destPath))
 		}
 	}
 
