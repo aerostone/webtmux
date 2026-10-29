@@ -29,6 +29,22 @@ func TestSessionSetAndValidate(t *testing.T) {
 	}
 }
 
+func TestSessionCookieUsesConfiguredBasePath(t *testing.T) {
+	sm := NewSessionManager("test-secret")
+	w := httptest.NewRecorder()
+	sm.SetCookieWithPath(w, false, "/webtmux")
+	cookie := w.Result().Cookies()[0]
+	if cookie.Path != "/webtmux/" {
+		t.Fatalf("cookie path = %q, want /webtmux/", cookie.Path)
+	}
+
+	clear := httptest.NewRecorder()
+	sm.ClearCookieWithPath(clear, "/webtmux")
+	if got := clear.Result().Cookies()[0].Path; got != "/webtmux/" {
+		t.Fatalf("cleared cookie path = %q, want /webtmux/", got)
+	}
+}
+
 func TestSessionRejectsInvalid(t *testing.T) {
 	sm := NewSessionManager("test-secret-key")
 

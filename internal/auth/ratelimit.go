@@ -17,7 +17,6 @@ type RateLimiter struct {
 type attemptEntry struct {
 	count    int
 	firstAt  time.Time
-	blocked  bool
 	blockEnd time.Time
 }
 
@@ -33,28 +32,40 @@ func NewRateLimiter(limit int, window, lockout time.Duration) *RateLimiter {
 }
 
 func (rl *RateLimiter) Allow(key string) bool {
+	return rl.RetryAfter(key) == 0
+}
+
+// Attempt atomically reserves an authentication attempt before verification.
+// Zero means admitted; a positive duration is the remaining lockout.
+func (rl *RateLimiter) Attempt(key string) time.Duration {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
+	now := time.Now()
+	if retry := rl.retryAfterLocked(key, now); retry > 0 {
+		return retry
+	}
+	rl.recordLocked(key, now)
+	return 0
+}
 
+func (rl *RateLimiter) RetryAfter(key string) time.Duration {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return rl.retryAfterLocked(key, time.Now())
+}
+
+func (rl *RateLimiter) retryAfterLocked(key string, now time.Time) time.Duration {
 	e, ok := rl.attempts[key]
 	if !ok {
-		return true
+		return 0
 	}
-
-	now := time.Now()
-	if e.blocked && now.Before(e.blockEnd) {
-		return false
+	if now.Before(e.blockEnd) {
+		return e.blockEnd.Sub(now)
 	}
-	if e.blocked && !now.Before(e.blockEnd) {
+	if !e.blockEnd.IsZero() || now.Sub(e.firstAt) >= rl.window {
 		delete(rl.attempts, key)
-		return true
 	}
-	if now.Sub(e.firstAt) > rl.window {
-		delete(rl.attempts, key)
-		return true
-	}
-
-	return e.count < rl.limit
+	return 0
 }
 
 func (rl *RateLimiter) RecordFailure(key string) {
@@ -62,20 +73,20 @@ func (rl *RateLimiter) RecordFailure(key string) {
 	defer rl.mu.Unlock()
 
 	now := time.Now()
-	e, ok := rl.attempts[key]
-	if !ok {
-		rl.attempts[key] = &attemptEntry{count: 1, firstAt: now}
+	if rl.retryAfterLocked(key, now) > 0 {
 		return
 	}
+	rl.recordLocked(key, now)
+}
 
-	if now.Sub(e.firstAt) > rl.window {
-		rl.attempts[key] = &attemptEntry{count: 1, firstAt: now}
-		return
+func (rl *RateLimiter) recordLocked(key string, now time.Time) {
+	e := rl.attempts[key]
+	if e == nil {
+		e = &attemptEntry{firstAt: now}
+		rl.attempts[key] = e
 	}
-
 	e.count++
 	if e.count >= rl.limit {
-		e.blocked = true
 		e.blockEnd = now.Add(rl.lockout)
 	}
 }
@@ -100,12 +111,8 @@ func (rl *RateLimiter) cleanup() {
 	for range ticker.C {
 		rl.mu.Lock()
 		now := time.Now()
-		for k, e := range rl.attempts {
-			if e.blocked && now.After(e.blockEnd) {
-				delete(rl.attempts, k)
-			} else if !e.blocked && now.Sub(e.firstAt) > rl.window*2 {
-				delete(rl.attempts, k)
-			}
+		for key := range rl.attempts {
+			rl.retryAfterLocked(key, now)
 		}
 		rl.mu.Unlock()
 	}

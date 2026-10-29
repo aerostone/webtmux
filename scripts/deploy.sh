@@ -10,6 +10,7 @@ SERVICE_FILE="$PROJECT_DIR/deploy/webtmux.service"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 ENV_DIR="$HOME/.config/webtmux"
 ENV_FILE="$ENV_DIR/env"
+CONFIG_FILE="$ENV_DIR/config.yaml"
 
 cd "$PROJECT_DIR"
 
@@ -37,6 +38,13 @@ echo "  ✓ 已安装"
 # ─── 3. 安装 systemd 服务 ───
 echo "▶ 安装 systemd 服务 ..."
 mkdir -p "$SYSTEMD_DIR"
+mkdir -p "$ENV_DIR"
+mkdir -p "$HOME/.webtmux"
+if [ ! -f "$CONFIG_FILE" ]; then
+    cp "$PROJECT_DIR/config.yaml.example" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE"
+    echo "  ✓ 已创建配置: $CONFIG_FILE（默认监听 127.0.0.1:3400，HTTP）"
+fi
 # 替换 ExecStart 路径为实际安装路径
 sed "s|/usr/local/bin/$BINARY_NAME|$INSTALL_DIR/$BINARY_NAME|g" "$SERVICE_FILE" > "$SYSTEMD_DIR/webtmux.service"
 systemctl --user daemon-reload
@@ -62,7 +70,7 @@ sleep 2
 if systemctl --user is-active --quiet webtmux; then
     echo "  ✓ webtmux 已启动"
     echo ""
-    echo "  端口: 3400"
+    echo "  配置: $CONFIG_FILE（默认监听 127.0.0.1:3400）"
     echo "  日志: journalctl --user -u webtmux -f"
     echo "  状态: systemctl --user status webtmux"
 else

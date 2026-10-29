@@ -1,23 +1,40 @@
 # webtmux 配置示例
-listen_addr: ":8080"
+listen_addr: "127.0.0.1:3400"
 
-# TLS 默认自动启用，证书自动生成在 ~/.webtmux/
-# 如需自定义证书：
+# 根路径用 ""；挂在 Nginx 的 /tmux/ 后面时设为 "/tmux"。
+# Nginx proxy_pass 必须保留此前缀，不要添加会剥离前缀的尾部 /。
+base_path: ""
+
+# 默认 HTTP；同机由 Nginx 在 443 终止 HTTPS 时保持 false。
+# 直接提供 HTTPS 时开启，并配置证书链和私钥；错误配置会停止启动。
+tls_enabled: false
 # tls_cert_file: "/path/to/cert.pem"
 # tls_key_file: "/path/to/key.pem"
 
-# 禁用 TLS（不推荐）
-# no_tls: true
+# 客户端证书认证：none 或 require_and_verify（严格 mTLS）。
+tls_client_auth: "none"
+# tls_client_ca_file: "/path/to/client-ca.pem"
+# 严格 mTLS 需要 tls_enabled: true 和 tls_client_auth: require_and_verify。
+# 旧 no_tls/-no-tls 仍可用，但不能与 tls_enabled: true 同时使用。
 
-auth_pass: "your-strong-password"
+# 仅信任这些代理提供的 X-Forwarded-For / X-Forwarded-Proto。
+# 单机 Nginx 示例：["127.0.0.1/32"]；默认不信任任何代理。
+trusted_proxy_cidrs: []
+
+auth_pass: "" # 必须设置强密码，或由 WEBTMUX_PASS 覆盖
 totp_enabled: false
 totp_secret: ""
-session_secret: ""
+session_secret: "" # 空值时每次进程启动随机生成
+# 密码/TOTP 和 WebAuthn 登录提交按客户端 IP 共用额度。
+# 成功登录重置额度；达到阈值后锁定，返回 429 和 Retry-After。
+# 三项都必须为正数；限流状态仅保存在当前进程内。
 max_login_attempts: 5
 login_window_sec: 300
 login_lockout_sec: 900
 ip_whitelist: []
 tmux_socket: ""
+webauthn_dir: "~/.webtmux"
+file_roots: []
 
 # 日志配置
 # log_level: "INFO"   # DEBUG, INFO, WARN, ERROR

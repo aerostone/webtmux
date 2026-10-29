@@ -46,3 +46,22 @@ func TestRateLimiterKeyFromRequest(t *testing.T) {
 		t.Errorf("expected IP, got %q", key)
 	}
 }
+
+func TestRateLimiterAttemptBudget(t *testing.T) {
+	rl := NewRateLimiter(3, time.Minute, time.Minute)
+	for i := 0; i < 3; i++ {
+		if retry := rl.Attempt("client"); retry != 0 {
+			t.Fatalf("attempt %d unexpectedly limited: %v", i+1, retry)
+		}
+	}
+	if retry := rl.RetryAfter("client"); retry <= 0 || retry > time.Minute {
+		t.Fatalf("expected lockout duration, got %v", retry)
+	}
+	if retry := rl.Attempt("client"); retry <= 0 {
+		t.Fatal("expected attempt budget to be exhausted")
+	}
+	rl.Reset("client")
+	if retry := rl.Attempt("client"); retry != 0 {
+		t.Fatalf("successful authentication should reset the budget: %v", retry)
+	}
+}

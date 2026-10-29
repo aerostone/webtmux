@@ -3,8 +3,8 @@ package server
 import (
 	"bufio"
 	"bytes"
-	"embed"
 	"crypto/subtle"
+	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,20 +33,21 @@ import (
 var webFS embed.FS
 
 type Server struct {
-	cfg       *config.Config
-	mux       *http.ServeMux
-	tmux      *tmux.Manager
-	filter    *authpkg.IPFilter
-	session   *authpkg.SessionManager
-	rateLimit *authpkg.RateLimiter
-	upgrade   websocket.Upgrader
-	credStore *authpkg.CredentialStore
-	webAuthn  *webauthn.WebAuthn // fallback when origin not detected
-	waCache   map[string]*webauthn.WebAuthn
-	waMu      sync.RWMutex
-	wsConns   map[string]*wsConnState // session name → active WS state
-	wsConnMu  sync.Mutex
-	activities *ActivityStore
+	cfg            *config.Config
+	mux            *http.ServeMux
+	tmux           *tmux.Manager
+	filter         *authpkg.IPFilter
+	trustedProxies *authpkg.IPFilter
+	session        *authpkg.SessionManager
+	rateLimit      *authpkg.RateLimiter
+	upgrade        websocket.Upgrader
+	credStore      *authpkg.CredentialStore
+	webAuthn       *webauthn.WebAuthn // fallback when origin not detected
+	waCache        map[string]*webauthn.WebAuthn
+	waMu           sync.RWMutex
+	wsConns        map[string]*wsConnState // session name → active WS state
+	wsConnMu       sync.Mutex
+	activities     *ActivityStore
 }
 
 // wsConnState tracks WebSocket connection and its tmux process
@@ -53,7 +55,7 @@ type Server struct {
 type wsConnState struct {
 	conn      *websocket.Conn
 	ptmx      tmux.Resizable
-	done        chan struct{} // closed when this WS handler fully returns
+	done      chan struct{} // closed when this WS handler fully returns
 	writeMu   sync.Mutex    // serializes all writes to conn (gorilla/websocket is not concurrency-safe)
 	closeOnce sync.Once     // ensures markDead runs only once across goroutines
 }
@@ -119,6 +121,10 @@ type createSessionReq struct {
 
 func New(cfg *config.Config) *http.Server {
 	filter, _ := authpkg.NewIPFilter(cfg.IPWhitelist)
+	var trustedProxies *authpkg.IPFilter
+	if len(cfg.TrustedProxyCIDRs) > 0 {
+		trustedProxies, _ = authpkg.NewIPFilter(cfg.TrustedProxyCIDRs)
+	}
 	session := authpkg.NewSessionManager(cfg.SessionSecret)
 
 	// Set session timeout from config
@@ -148,16 +154,17 @@ func New(cfg *config.Config) *http.Server {
 	}
 
 	s := &Server{
-		cfg:       cfg,
-		mux:       http.NewServeMux(),
-		tmux:      tmux.NewManager(cfg.TmuxSocket),
-		filter:    filter,
-		session:   session,
-		rateLimit: rateLimit,
-		credStore: credStore,
-		webAuthn:  wa,
-		wsConns:   make(map[string]*wsConnState),
-		activities: actStore,
+		cfg:            cfg,
+		mux:            http.NewServeMux(),
+		tmux:           tmux.NewManager(cfg.TmuxSocket),
+		filter:         filter,
+		trustedProxies: trustedProxies,
+		session:        session,
+		rateLimit:      rateLimit,
+		credStore:      credStore,
+		webAuthn:       wa,
+		wsConns:        make(map[string]*wsConnState),
+		activities:     actStore,
 		upgrade: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				if cfg.AllowAllOrigins {
@@ -179,14 +186,17 @@ func New(cfg *config.Config) *http.Server {
 
 	handler := loggingMiddleware(recoveryMiddleware(securityHeaders(
 		bodyLimitMiddleware(
-			authpkg.Middleware(filter)(
+			authpkg.Middleware(filter, trustedProxies)(
 				authpkg.LoginRequired(&authpkg.AuthConfig{
-					Password:    cfg.AuthPass,
-					TOTPSecret:  cfg.TOTPSecret,
-					TOTPEnabled: cfg.TOTPEnabled,
-					Session:     session,
-					RateLimiter: rateLimit,
+					Password:       cfg.AuthPass,
+					TOTPSecret:     cfg.TOTPSecret,
+					TOTPEnabled:    cfg.TOTPEnabled,
+					Session:        session,
+					RateLimiter:    rateLimit,
+					TrustedProxies: trustedProxies,
+					BasePath:       cfg.BasePath,
 				})(s.mux))))))
+	handler = basePathMiddleware(cfg.BasePath, handler)
 
 	logger.Infof("server config: listen=%s ip_whitelist=%v totp=%v",
 		cfg.ListenAddr, len(cfg.IPWhitelist) > 0, cfg.TOTPEnabled)
@@ -290,7 +300,55 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/ws", s.handleWebSocket)
 
 	webContent, _ := fs.Sub(webFS, "web")
-	s.mux.Handle("/", http.FileServer(http.FS(webContent)))
+	fileServer := http.FileServer(http.FS(webContent))
+	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		data, err := fs.ReadFile(webFS, "web/index.html")
+		if err != nil {
+			http.Error(w, "web application unavailable", http.StatusInternalServerError)
+			return
+		}
+		basePathJSON, _ := json.Marshal(s.cfg.BasePath)
+		injection := []byte("<script>window.WEBTMUX_BASE_PATH=" + string(basePathJSON) + ";</script>")
+		data = bytes.Replace(data, []byte("</head>"), append(injection, []byte("</head>")...), 1)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(data)
+	})
+}
+
+func basePathMiddleware(basePath string, next http.Handler) http.Handler {
+	if basePath == "" {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		if path == "/" || path == basePath {
+			target := basePath + "/"
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusPermanentRedirect)
+			return
+		}
+		if !strings.HasPrefix(path, basePath+"/") {
+			http.NotFound(w, r)
+			return
+		}
+		clone := r.Clone(r.Context())
+		urlCopy := *r.URL
+		urlCopy.Path = strings.TrimPrefix(path, basePath)
+		if urlCopy.Path == "" {
+			urlCopy.Path = "/"
+		}
+		if urlCopy.RawPath != "" {
+			urlCopy.RawPath = strings.TrimPrefix(urlCopy.RawPath, basePath)
+		}
+		clone.URL = &urlCopy
+		next.ServeHTTP(w, clone)
+	})
 }
 
 // getWebAuthn returns a WebAuthn instance for the request's origin.
@@ -299,7 +357,7 @@ func (s *Server) getWebAuthn(r *http.Request) *webauthn.WebAuthn {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		scheme := "http"
-		if r.TLS != nil {
+		if authpkg.RequestIsHTTPS(r, s.trustedProxies) {
 			scheme = "https"
 		}
 		origin = fmt.Sprintf("%s://%s", scheme, r.Host)
@@ -348,7 +406,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	resp := map[string]interface{}{
-		"ws_timeout_sec": s.cfg.WSTimeoutSec,
+		"ws_timeout_sec":      s.cfg.WSTimeoutSec,
 		"session_timeout_sec": s.cfg.SessionTimeoutSec,
 	}
 	if s.cfg.SentryDSN != "" {
@@ -357,15 +415,44 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+// Login submissions share one per-client budget. WebAuthn challenge requests
+// have a separate budget so that starting and finishing do not count twice.
+func (s *Server) allowAuthentication(w http.ResponseWriter, r *http.Request, consume bool) bool {
+	key := authpkg.ClientIP(r, s.trustedProxies).String()
+	var retry time.Duration
+	if consume {
+		retry = s.rateLimit.Attempt(key)
+	} else {
+		retry = s.rateLimit.RetryAfter(key)
+		if retry == 0 {
+			retry = s.rateLimit.Attempt("webauthn-start:" + key)
+		}
+	}
+	if retry == 0 {
+		return true
+	}
+	seconds := int64(retry / time.Second)
+	if retry%time.Second != 0 {
+		seconds++
+	}
+	w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+	http.Error(w, "too many attempts, try later", http.StatusTooManyRequests)
+	return false
+}
+
+func (s *Server) resetAuthentication(r *http.Request) {
+	key := authpkg.ClientIP(r, s.trustedProxies).String()
+	s.rateLimit.Reset(key)
+	s.rateLimit.Reset("webauthn-start:" + key)
+}
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	key := s.rateLimit.KeyFromRequest(r.RemoteAddr)
-	if !s.rateLimit.Allow(key) {
-		http.Error(w, "too many attempts, try later", http.StatusTooManyRequests)
+	if !s.allowAuthentication(w, r, true) {
 		return
 	}
 
@@ -381,20 +468,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if subtle.ConstantTimeCompare([]byte(req.Password), []byte(s.cfg.AuthPass)) != 1 {
-		s.rateLimit.RecordFailure(key)
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
 
 	if s.cfg.TOTPEnabled && s.cfg.TOTPSecret != "" {
 		if !authpkg.VerifyTOTP(s.cfg.TOTPSecret, req.TOTPCode) {
-			s.rateLimit.RecordFailure(key)
 			http.Error(w, "invalid TOTP code", http.StatusUnauthorized)
 			return
 		}
 	}
 
-	s.rateLimit.Reset(key)
+	s.resetAuthentication(r)
 
 	// Close all existing connections on login for clean state
 	s.closeAllConns()
@@ -404,8 +489,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		s.activities.Log(ActivityLogin, "User logged in", WithRemote(r.RemoteAddr))
 	}
 
-	secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
-	s.session.SetCookie(w, secure)
+	secure := authpkg.RequestIsHTTPS(r, s.trustedProxies)
+	s.session.SetCookieWithPath(w, secure, s.cfg.BasePath)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"ok"}`))
@@ -420,7 +505,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		s.activities.Log(ActivityLogout, "User logged out", WithRemote(r.RemoteAddr))
 	}
 
-	s.session.ClearCookie(w)
+	s.session.ClearCookieWithPath(w, s.cfg.BasePath)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -610,8 +695,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				if err := state.writeMessage(websocket.PingMessage, nil); err != nil {
 					logger.Warnf("ws ping failed (half-open detected): session=%s err=%v", sessionName, err)
-				state.markDead("ping failed")
-				return
+					state.markDead("ping failed")
+					return
 				}
 				// Clear write deadline so the main data-write loop isn't constrained
 				conn.SetWriteDeadline(time.Time{})
@@ -780,8 +865,9 @@ func (s *Server) handleWebAuthnRegisterStart(w http.ResponseWriter, r *http.Requ
 	cookie := &http.Cookie{
 		Name:     "webauthn_session",
 		Value:    base64.StdEncoding.EncodeToString(sessionJSON),
-		Path:     "/",
+		Path:     authpkg.CookiePath(s.cfg.BasePath),
 		HttpOnly: true,
+		Secure:   authpkg.RequestIsHTTPS(r, s.trustedProxies),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   300,
 	}
@@ -839,24 +925,20 @@ func (s *Server) handleWebAuthnRegisterFinish(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) handleWebAuthnLoginStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.allowAuthentication(w, r, false) {
+		return
+	}
 	wa := s.getWebAuthn(r)
 	if wa == nil || s.credStore == nil {
 		http.Error(w, "webauthn not available", http.StatusServiceUnavailable)
 		return
 	}
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	if !s.credStore.HasCredentials() {
 		http.Error(w, "no credentials registered", http.StatusNotFound)
-		return
-	}
-
-	// Rate limit WebAuthn login attempts
-	key := s.rateLimit.KeyFromRequest(r.RemoteAddr)
-	if !s.rateLimit.Allow(key) {
-		http.Error(w, "too many attempts, try later", http.StatusTooManyRequests)
 		return
 	}
 
@@ -872,8 +954,9 @@ func (s *Server) handleWebAuthnLoginStart(w http.ResponseWriter, r *http.Request
 	cookie := &http.Cookie{
 		Name:     "webauthn_session",
 		Value:    base64.StdEncoding.EncodeToString(sessionJSON),
-		Path:     "/",
+		Path:     authpkg.CookiePath(s.cfg.BasePath),
 		HttpOnly: true,
+		Secure:   authpkg.RequestIsHTTPS(r, s.trustedProxies),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   300,
 	}
@@ -884,13 +967,16 @@ func (s *Server) handleWebAuthnLoginStart(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) handleWebAuthnLoginFinish(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.allowAuthentication(w, r, true) {
+		return
+	}
 	wa := s.getWebAuthn(r)
 	if wa == nil || s.credStore == nil {
 		http.Error(w, "webauthn not available", http.StatusServiceUnavailable)
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -914,7 +1000,6 @@ func (s *Server) handleWebAuthnLoginFinish(w http.ResponseWriter, r *http.Reques
 	cred, err := wa.FinishLogin(user, sessionData, r)
 	if err != nil {
 		logger.Errorf("webauthn.*error: %v", err)
-		s.rateLimit.RecordFailure(s.rateLimit.KeyFromRequest(r.RemoteAddr))
 		http.Error(w, "authentication failed", http.StatusUnauthorized)
 		return
 	}
@@ -925,9 +1010,9 @@ func (s *Server) handleWebAuthnLoginFinish(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Reset rate limit on success
-	s.rateLimit.Reset(s.rateLimit.KeyFromRequest(r.RemoteAddr))
+	s.resetAuthentication(r)
 
-	s.session.SetCookie(w, r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https")
+	s.session.SetCookieWithPath(w, authpkg.RequestIsHTTPS(r, s.trustedProxies), s.cfg.BasePath)
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"status":"ok"}`))
 }

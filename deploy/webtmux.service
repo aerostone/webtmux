@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/webtmux -listen :3400 -no-tls
+ExecStart=/usr/local/bin/webtmux -config %h/.config/webtmux/config.yaml
 Restart=on-failure
 RestartSec=3
 StandardOutput=journal

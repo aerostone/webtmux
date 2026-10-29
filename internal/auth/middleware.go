@@ -6,11 +6,13 @@ import (
 )
 
 type AuthConfig struct {
-	Password    string
-	TOTPSecret  string
-	TOTPEnabled bool
-	Session     *SessionManager
-	RateLimiter *RateLimiter
+	Password       string
+	TOTPSecret     string
+	TOTPEnabled    bool
+	Session        *SessionManager
+	RateLimiter    *RateLimiter
+	TrustedProxies *IPFilter
+	BasePath       string
 }
 
 func LoginRequired(cfg *AuthConfig) func(http.Handler) http.Handler {
@@ -22,8 +24,8 @@ func LoginRequired(cfg *AuthConfig) func(http.Handler) http.Handler {
 			}
 			if cfg.Session.Validate(r) {
 				// Sliding window: refresh cookie if needed
-				secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
-				cfg.Session.RefreshIfStale(w, r, secure)
+				secure := RequestIsHTTPS(r, cfg.TrustedProxies)
+				cfg.Session.RefreshIfStaleWithPath(w, r, secure, cfg.BasePath)
 				next.ServeHTTP(w, r)
 				return
 			}

@@ -40,11 +40,23 @@ func NewSessionManager(secret string) *SessionManager {
 
 // SetCookie signs and sets a session cookie with the current timestamp.
 func (sm *SessionManager) SetCookie(w http.ResponseWriter, secure bool) {
+	sm.SetCookieWithPath(w, secure, "")
+}
+
+func CookiePath(basePath string) string {
+	if basePath == "" || basePath == "/" {
+		return "/"
+	}
+	return strings.TrimRight(basePath, "/") + "/"
+}
+
+// SetCookieWithPath signs and sets a session cookie scoped to the app mount.
+func (sm *SessionManager) SetCookieWithPath(w http.ResponseWriter, secure bool, basePath string) {
 	sig := sm.signNow()
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
 		Value:    sig,
-		Path:     "/",
+		Path:     CookiePath(basePath),
 		HttpOnly: true,
 		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
@@ -65,6 +77,10 @@ func (sm *SessionManager) Validate(r *http.Request) bool {
 // RefreshIfStale extends the cookie if more than half the timeout has passed.
 // Call this after successful validation to implement sliding window.
 func (sm *SessionManager) RefreshIfStale(w http.ResponseWriter, r *http.Request, secure bool) {
+	sm.RefreshIfStaleWithPath(w, r, secure, "")
+}
+
+func (sm *SessionManager) RefreshIfStaleWithPath(w http.ResponseWriter, r *http.Request, secure bool, basePath string) {
 	cookie, err := r.Cookie(cookieName)
 	if err != nil {
 		return
@@ -76,16 +92,20 @@ func (sm *SessionManager) RefreshIfStale(w http.ResponseWriter, r *http.Request,
 	elapsed := time.Since(time.Unix(ts, 0))
 	// Refresh if more than half the timeout has passed
 	if elapsed > SessionTimeout/2 {
-		sm.SetCookie(w, secure)
+		sm.SetCookieWithPath(w, secure, basePath)
 	}
 }
 
 // ClearCookie removes the session cookie.
 func (sm *SessionManager) ClearCookie(w http.ResponseWriter) {
+	sm.ClearCookieWithPath(w, "")
+}
+
+func (sm *SessionManager) ClearCookieWithPath(w http.ResponseWriter, basePath string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:   cookieName,
 		Value:  "",
-		Path:   "/",
+		Path:   CookiePath(basePath),
 		MaxAge: -1,
 	})
 }

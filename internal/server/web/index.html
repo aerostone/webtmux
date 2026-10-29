@@ -465,6 +465,9 @@ body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;height:10
 
 <script>
 // UMD bundles: Terminal and FitAddon are globals from <script src> above
+const BASE_PATH=window.WEBTMUX_BASE_PATH||'';
+const appPath=path=>BASE_PATH+path;
+const appFetch=(path,options)=>fetch(appPath(path),options);
 
 // Unify loopback addresses to "127.0.0.1": WebAuthn binds credentials to the
 // rpId (= hostname), so a fingerprint registered at "127.0.0.1" is unusable
@@ -487,7 +490,7 @@ let currentSession=null;
 let wsTimeoutSec=0;  // 0=disabled (backend ping/pong handles half-open); set via /api/config
 
 // Fetch config from server
-fetch('/api/config').then(r=>r.ok?r.json():{}).then(c=>{
+appFetch('/api/config').then(r=>r.ok?r.json():{}).then(c=>{
   if(c.ws_timeout_sec)wsTimeoutSec=c.ws_timeout_sec;
   if(c.sentry_dsn)Sentry.init(c.sentry_dsn);
 }).catch(()=>{});
@@ -556,7 +559,7 @@ function registerPlugin(p){ plugins.push(p); p.init?.({send,sendKey,api}); }
 function api(method,path,body){
   const opts={method,headers:{'Content-Type':'application/json'}};
   if(body) opts.body=JSON.stringify(body);
-  return fetch(path,opts).then(r=>{
+  return appFetch(path,opts).then(r=>{
     if(r.status===401){showLogin();return Promise.reject(new Error('session expired'));}
     return r.ok?r.json():Promise.reject(r);
   });
@@ -862,7 +865,7 @@ async function doLogin(){
   }
   btn.disabled=true;btn.classList.add('loading');
   try{
-    const res=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password,totp_code:totpCode})});
+    const res=await appFetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password,totp_code:totpCode})});
     if(res.ok){
       okEl.innerHTML='✓ 登录成功，正在进入...';
       btn.innerHTML='<span class="spinner" style="display:inline-block"></span><span class="btn-text">进入中...</span>';
@@ -879,7 +882,7 @@ async function doLogin(){
   finally{btn.disabled=false;btn.classList.remove('loading');if(!okEl.textContent)btn.innerHTML='<span class="spinner"></span><span class="btn-text">Login</span>'}
 }
 
-async function checkSession(){try{const r=await fetch('/api/sessions');if(r.ok)showApp()}catch(e){}}
+async function checkSession(){try{const r=await appFetch('/api/sessions');if(r.ok)showApp()}catch(e){}}
 
 function showApp(){
   loginView.style.display='none';appView.style.display='flex';
@@ -1150,7 +1153,7 @@ $('kill-modal-confirm').addEventListener('click',async()=>{
   if(!pass){$('kill-modal-error').textContent='请输入密码';return}
   // Verify password first
   try{
-    const res=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pass})});
+    const res=await appFetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pass})});
     if(!res.ok){$('kill-modal-error').textContent='密码错误';return}
   }catch(e){$('kill-modal-error').textContent='验证失败';return}
   await api('POST','/api/sessions/kill',{name:killTargetName});
@@ -1158,12 +1161,12 @@ $('kill-modal-confirm').addEventListener('click',async()=>{
 });
 $('kill-modal-fp').addEventListener('click',async()=>{
   try{
-    const optRes=await fetch('/api/webauthn/login/start');
+    const optRes=await appFetch('/api/webauthn/login/start');
     if(!optRes.ok){$('kill-modal-error').textContent='指纹不可用';return}
     const options=await optRes.json();
     const pk=options.publicKey||options;
     const cred=await navigator.credentials.get({publicKey:{challenge:b64ToBuf(pk.challenge),timeout:pk.timeout,rpId:pk.rpId,allowCredentials:(pk.allowCredentials||[]).map(c=>({type:c.type,id:b64ToBuf(c.id),transports:c.transports})),userVerification:pk.userVerification||'preferred'}});
-    const authRes=await fetch('/api/webauthn/login/finish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:cred.id,rawId:bufToB64(cred.rawId),type:cred.type,response:{authenticatorData:bufToB64(cred.response.authenticatorData),clientDataJSON:bufToB64(cred.response.clientDataJSON),signature:bufToB64(cred.response.signature)}})});
+    const authRes=await appFetch('/api/webauthn/login/finish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:cred.id,rawId:bufToB64(cred.rawId),type:cred.type,response:{authenticatorData:bufToB64(cred.response.authenticatorData),clientDataJSON:bufToB64(cred.response.clientDataJSON),signature:bufToB64(cred.response.signature)}})});
     if(!authRes.ok){$('kill-modal-error').textContent='指纹验证失败';return}
     await api('POST','/api/sessions/kill',{name:killTargetName});
     hideKillModal();loadSessionsList();
@@ -1189,7 +1192,7 @@ let fmDeleteTarget=null;  // {path, isDir}
 async function fmLoadDir(path,pushHistory){
   try{
     if(pushHistory!==false&&fmCurrentPath&&fmCurrentPath!==path){fmHistory.push(fmCurrentPath)}
-    const r=await fetch('/api/files?action=list&path='+encodeURIComponent(path));
+    const r=await appFetch('/api/files?action=list&path='+encodeURIComponent(path));
     if(!r.ok){const e=await r.json();$('fm-status').textContent='Error: '+e.error;return}
     const d=await r.json();
     fmCurrentPath=d.path;
@@ -1261,7 +1264,7 @@ async function fmUpload(files){
   fd.append('path',fmCurrentPath);
   for(const f of files)fd.append('files',f);
   try{
-    const r=await fetch('/api/files?action=upload',{method:'POST',body:fd});
+    const r=await appFetch('/api/files?action=upload',{method:'POST',body:fd});
     const d=await r.json();
     if(r.ok){status.className='fm-status success';status.textContent='上传成功: '+(d.uploaded||[]).join(', ')}
     else{status.className='fm-status error';status.textContent='上传失败: '+d.error}
@@ -1278,18 +1281,18 @@ async function fmDelete(path,isDir){
   // File deletion - simple confirm
   if(!confirm('删除 '+path+'?'))return;
   try{
-    const r=await fetch('/api/files?action=delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});
+    const r=await appFetch('/api/files?action=delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});
     if(r.ok){$('fm-status').textContent='已删除';fmLoadDir(fmCurrentPath)}
     else{const d=await r.json();$('fm-status').textContent='删除失败: '+d.error}
   }catch(e){$('fm-status').textContent='删除失败: '+e.message}
 }
 function fmDownload(path){
-  window.open('/api/files?action=download&path='+encodeURIComponent(path),'_blank')}
+  window.open(appPath('/api/files?action=download&path='+encodeURIComponent(path)),'_blank')}
 async function fmMkdir(){
   const name=prompt('新文件夹名称:');if(!name)return;
   const path=fmCurrentPath+'/'+name;
   try{
-    const r=await fetch('/api/files?action=mkdir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});
+    const r=await appFetch('/api/files?action=mkdir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})});
     if(r.ok){fmLoadDir(fmCurrentPath)}
     else{const d=await r.json();$('fm-status').textContent='创建失败: '+d.error}
   }catch(e){$('fm-status').textContent='创建失败: '+e.message}
@@ -1315,11 +1318,11 @@ $('fm-delete-modal-confirm').addEventListener('click',async()=>{
   const pass=$('fm-delete-modal-pass').value.trim();
   if(!pass){$('fm-delete-modal-error').textContent='请输入密码';return}
   try{
-    const res=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pass})});
+    const res=await appFetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pass})});
     if(!res.ok){$('fm-delete-modal-error').textContent='密码错误';return}
   }catch(e){$('fm-delete-modal-error').textContent='验证失败';return}
   try{
-    const r=await fetch('/api/files?action=delete-dir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:fmDeleteTarget.path})});
+    const r=await appFetch('/api/files?action=delete-dir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:fmDeleteTarget.path})});
     if(r.ok){$('fm-status').textContent='已删除';fmLoadDir(fmCurrentPath)}
     else{const d=await r.json();$('fm-status').textContent='删除失败: '+d.error}
   }catch(e){$('fm-status').textContent='删除失败: '+e.message}
@@ -1328,14 +1331,14 @@ $('fm-delete-modal-confirm').addEventListener('click',async()=>{
 $('fm-delete-modal-fp').addEventListener('click',async()=>{
   if(!fmDeleteTarget)return;
   try{
-    const optRes=await fetch('/api/webauthn/login/start');
+    const optRes=await appFetch('/api/webauthn/login/start');
     if(!optRes.ok){$('fm-delete-modal-error').textContent='指纹不可用';return}
     const options=await optRes.json();
     const pk=options.publicKey||options;
     const cred=await navigator.credentials.get({publicKey:{challenge:b64ToBuf(pk.challenge),timeout:pk.timeout,rpId:pk.rpId,allowCredentials:(pk.allowCredentials||[]).map(c=>({type:c.type,id:b64ToBuf(c.id),transports:c.transports})),userVerification:pk.userVerification||'preferred'}});
-    const authRes=await fetch('/api/webauthn/login/finish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:cred.id,rawId:bufToB64(cred.rawId),type:cred.type,response:{authenticatorData:bufToB64(cred.response.authenticatorData),clientDataJSON:bufToB64(cred.response.clientDataJSON),signature:bufToB64(cred.response.signature)}})});
+    const authRes=await appFetch('/api/webauthn/login/finish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:cred.id,rawId:bufToB64(cred.rawId),type:cred.type,response:{authenticatorData:bufToB64(cred.response.authenticatorData),clientDataJSON:bufToB64(cred.response.clientDataJSON),signature:bufToB64(cred.response.signature)}})});
     if(!authRes.ok){$('fm-delete-modal-error').textContent='指纹验证失败';return}
-    const r=await fetch('/api/files?action=delete-dir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:fmDeleteTarget.path})});
+    const r=await appFetch('/api/files?action=delete-dir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:fmDeleteTarget.path})});
     if(r.ok){$('fm-status').textContent='已删除';fmLoadDir(fmCurrentPath)}
     else{const d=await r.json();$('fm-status').textContent='删除失败: '+d.error}
   }catch(e){
@@ -1442,7 +1445,7 @@ $('qc-export').addEventListener('click',qcExport);
 let smAutoRefresh=null;
 async function smRefresh(){
   try{
-    const r=await fetch('/api/system');
+    const r=await appFetch('/api/system');
     if(!r.ok)throw new Error('请求失败');
     const d=await r.json();
     $('sm-cpu').textContent=d.cpu+'%';
@@ -1520,7 +1523,7 @@ function connect(name){
   if(term)term.clear();
   const proto=location.protocol==='https:'?'wss:':'ws:';
   setWsStatus('connecting');
-  ws=new WebSocket(`${proto}//${location.host}/ws?session=${name}`);
+  ws=new WebSocket(`${proto}//${location.host}${appPath('/ws')}?session=${encodeURIComponent(name)}`);
   ws.binaryType='arraybuffer';
   ws.onopen=()=>{
     wsLog('open',name);
@@ -1656,7 +1659,7 @@ $('logout-btn').addEventListener('click',async()=>{
   currentSession=null;
   resetReconnectState();
   hideDisconnectOverlay();
-  await fetch('/api/logout');if(ws)ws.close();if(term)term.clear();
+  await appFetch('/api/logout');if(ws)ws.close();if(term)term.clear();
   setWsStatus('disconnected');
   activeModifiers.clear();
   modRowInner.querySelectorAll('.key').forEach(k=>k.classList.remove('active-mod'));
@@ -1695,7 +1698,7 @@ let webauthnAvailable=false, webauthnRegistered=false;
 async function checkWebAuthn(){
   if(!window.PublicKeyCredential){return}
   try{
-    const r=await fetch('/api/webauthn/status');
+    const r=await appFetch('/api/webauthn/status');
     if(!r.ok)return;
     const d=await r.json();
     webauthnAvailable=d.enabled;
@@ -1712,7 +1715,7 @@ $('fingerprint-btn').addEventListener('click',async()=>{
   const btn=$('fingerprint-btn');const errEl=$('login-error');errEl.textContent='';
   if(btn.disabled)return;btn.disabled=true;btn.style.opacity='0.6';
   try{
-    const optRes=await fetch('/api/webauthn/login/start');
+    const optRes=await appFetch('/api/webauthn/login/start');
     if(!optRes.ok){errEl.innerHTML='<span class="error-icon">✗</span>指纹不可用';return}
     const options=await optRes.json();
     const pk=options.publicKey||options;
@@ -1727,7 +1730,7 @@ $('fingerprint-btn').addEventListener('click',async()=>{
         userVerification:pk.userVerification||'preferred'
       }
     });
-    const authRes=await fetch('/api/webauthn/login/finish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+    const authRes=await appFetch('/api/webauthn/login/finish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
       id:cred.id,rawId:bufToB64(cred.rawId),type:cred.type,
       response:{authenticatorData:bufToB64(cred.response.authenticatorData),clientDataJSON:bufToB64(cred.response.clientDataJSON),signature:bufToB64(cred.response.signature)}
     })});
@@ -1745,7 +1748,7 @@ $('fingerprint-btn').addEventListener('click',async()=>{
 // Enable fingerprint registration (called from status bar button)
 async function enableFingerprint(){
   try{
-    const optRes=await fetch('/api/webauthn/register/start');
+    const optRes=await appFetch('/api/webauthn/register/start');
     if(!optRes.ok){alert('注册失败');return}
     const options=await optRes.json();
     const pk=options.publicKey||options;
@@ -1762,7 +1765,7 @@ async function enableFingerprint(){
         attestation:pk.attestation||'none'
       }
     });
-    const finRes=await fetch('/api/webauthn/register/finish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+    const finRes=await appFetch('/api/webauthn/register/finish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
       id:cred.id,rawId:bufToB64(cred.rawId),type:cred.type,
       response:{attestationObject:bufToB64(cred.response.attestationObject),clientDataJSON:bufToB64(cred.response.clientDataJSON)}
     })});
@@ -1780,7 +1783,7 @@ async function enableFingerprint(){
 async function removeFingerprint(){
   if(!confirm('确定移除指纹登录？'))return;
   try{
-    await fetch('/api/webauthn/remove',{method:'POST'});
+    await appFetch('/api/webauthn/remove',{method:'POST'});
     webauthnRegistered=false;
     updateFpButton();
     $('fingerprint-btn').style.display='none';
